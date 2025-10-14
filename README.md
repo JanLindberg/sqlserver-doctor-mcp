@@ -8,6 +8,7 @@ Currently implemented tools:
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
 - **get_active_sessions** - Monitor currently executing queries with CPU usage, wait stats, and blocking information
+- **get_scheduler_stats** - Monitor CPU queue depth and detect CPU pressure with automatic interpretation
 
 ## Prerequisites
 
@@ -104,6 +105,12 @@ Once connected, Claude can use these tools:
   - Wait time and wait type
   - Blocking session information
   - Client host, program, and login details
+- **get_scheduler_stats()** - Returns CPU scheduler statistics with automatic interpretation:
+  - Runnable task counts (CPU queue depth)
+  - Work queue counts
+  - Pending I/O operations
+  - CPU pressure detection (tasks waiting for CPU)
+  - Automatic interpretation of results
 
 ### Example Usage
 
@@ -115,6 +122,9 @@ Ask Claude:
 - "Are there any blocked sessions right now?"
 - "Which query is using the most CPU?"
 - "What is session 52 currently executing?"
+- "Is there CPU pressure on the server?"
+- "Check the CPU queue depth"
+- "Are tasks waiting for CPU resources?"
 
 
 ## Project Structure

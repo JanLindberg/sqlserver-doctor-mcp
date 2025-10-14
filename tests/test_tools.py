@@ -1,14 +1,15 @@
 """Tests for MCP server tools."""
 
-import pytest
 from unittest.mock import patch, MagicMock
 from sqlserver_doctor.server import (
     get_server_version,
     list_databases,
     get_active_sessions,
+    get_scheduler_stats,
     ServerVersionResponse,
     DatabaseListResponse,
     ActiveSessionsResponse,
+    SchedulerStatsResponse,
 )
 
 
@@ -265,3 +266,124 @@ class TestGetActiveSessions:
         assert result.count == 0
         assert len(result.sessions) == 0
         assert "Insufficient permissions" in result.error
+
+
+class TestGetSchedulerStats:
+    """Tests for get_scheduler_stats tool."""
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_scheduler_stats_no_pressure(self, mock_get_connection):
+        """Test scheduler stats with no CPU pressure."""
+        # Setup mock - 4 CPU cores, no runnable tasks
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "scheduler_id": 0,
+                "current_tasks_count": 5,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+            {
+                "scheduler_id": 1,
+                "current_tasks_count": 3,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+            {
+                "scheduler_id": 2,
+                "current_tasks_count": 4,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+            {
+                "scheduler_id": 3,
+                "current_tasks_count": 2,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_scheduler_stats()
+
+        # Verify
+        assert isinstance(result, SchedulerStatsResponse)
+        assert result.success is True
+        assert result.scheduler_count == 4
+        assert result.total_runnable_tasks == 0
+        assert result.avg_runnable_per_scheduler == 0.0
+        assert result.cpu_pressure_detected is False
+        assert "No CPU pressure" in result.interpretation
+        assert result.error is None
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_scheduler_stats_with_pressure(self, mock_get_connection):
+        """Test scheduler stats with CPU pressure detected."""
+        # Setup mock - CPU pressure on scheduler 1 and 2
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "scheduler_id": 0,
+                "current_tasks_count": 8,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+            {
+                "scheduler_id": 1,
+                "current_tasks_count": 10,
+                "runnable_tasks_count": 2,
+                "work_queue_count": 5,
+                "pending_disk_io_count": 1,
+            },
+            {
+                "scheduler_id": 2,
+                "current_tasks_count": 9,
+                "runnable_tasks_count": 3,
+                "work_queue_count": 2,
+                "pending_disk_io_count": 0,
+            },
+            {
+                "scheduler_id": 3,
+                "current_tasks_count": 6,
+                "runnable_tasks_count": 0,
+                "work_queue_count": 0,
+                "pending_disk_io_count": 0,
+            },
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_scheduler_stats()
+
+        # Verify
+        assert isinstance(result, SchedulerStatsResponse)
+        assert result.success is True
+        assert result.scheduler_count == 4
+        assert result.total_runnable_tasks == 5  # 0 + 2 + 3 + 0
+        assert result.avg_runnable_per_scheduler == 1.25  # 5 / 4
+        assert result.cpu_pressure_detected is True
+        assert "CPU PRESSURE DETECTED" in result.interpretation
+        assert "5 task(s) waiting for CPU" in result.interpretation
+        assert result.error is None
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_scheduler_stats_error(self, mock_get_connection):
+        """Test scheduler stats with database error."""
+        mock_conn = MagicMock()
+        mock_conn.execute_query.side_effect = Exception("Access denied")
+        mock_get_connection.return_value = mock_conn
+
+        result = get_scheduler_stats()
+
+        assert isinstance(result, SchedulerStatsResponse)
+        assert result.success is False
+        assert result.scheduler_count == 0
+        assert result.total_runnable_tasks == 0
+        assert result.cpu_pressure_detected is False
+        assert "Access denied" in result.error

@@ -76,6 +76,37 @@ class ActiveSessionsResponse(BaseModel):
     error: str | None = Field(None, description="Error message if query failed")
 
 
+class SchedulerStats(BaseModel):
+    """Statistics for a single SQL Server scheduler."""
+
+    scheduler_id: int = Field(description="Scheduler ID")
+    current_tasks_count: int = Field(description="Total tasks assigned to this scheduler")
+    runnable_tasks_count: int = Field(
+        description="Tasks waiting for CPU (CPU pressure indicator if > 0)"
+    )
+    work_queue_count: int = Field(description="Work items in the queue")
+    pending_disk_io_count: int = Field(description="Pending I/O operations")
+
+
+class SchedulerStatsResponse(BaseModel):
+    """Response model for scheduler statistics."""
+
+    schedulers: list[SchedulerStats] = Field(description="List of scheduler statistics")
+    scheduler_count: int = Field(description="Number of schedulers (typically = CPU cores)")
+    total_runnable_tasks: int = Field(
+        description="Total tasks waiting for CPU across all schedulers"
+    )
+    avg_runnable_per_scheduler: float = Field(
+        description="Average runnable tasks per scheduler"
+    )
+    cpu_pressure_detected: bool = Field(
+        description="Whether CPU pressure is detected (runnable tasks > 0)"
+    )
+    interpretation: str = Field(description="Interpretation guide for the results")
+    success: bool = Field(description="Whether the query was successful")
+    error: str | None = Field(None, description="Error message if query failed")
+
+
 # Tools
 @mcp.tool()
 def get_server_version() -> ServerVersionResponse:
@@ -225,6 +256,90 @@ def get_active_sessions() -> ActiveSessionsResponse:
         return ActiveSessionsResponse(
             sessions=[],
             count=0,
+            success=False,
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def get_scheduler_stats() -> SchedulerStatsResponse:
+    """
+    Get SQL Server scheduler statistics for CPU queue monitoring.
+
+    Returns detailed scheduler information including runnable task counts (CPU queue depth),
+    work queue counts, and pending I/O operations. This is critical for identifying CPU
+    pressure and performance bottlenecks.
+
+    Key metrics interpretation:
+    - runnable_tasks_count > 0: Tasks are waiting for CPU (CPU pressure indicator)
+    - Sustained runnable_tasks_count > 0: Indicates CPU bottleneck
+    - work_queue_count: Pending work items
+    - pending_disk_io_count: I/O operations waiting
+
+    Rule of thumb: Healthy systems typically have runnable_tasks_count = 0.
+    """
+    logger.info("Tool called: get_scheduler_stats")
+    try:
+        conn = get_connection()
+        results = conn.execute_query(
+            """
+            SELECT
+                scheduler_id,
+                current_tasks_count,
+                runnable_tasks_count,
+                work_queue_count,
+                pending_disk_io_count
+            FROM sys.dm_os_schedulers
+            WHERE scheduler_id < 255
+            """
+        )
+
+        schedulers = [SchedulerStats(**sched) for sched in results]
+
+        # Calculate aggregate metrics
+        total_runnable = sum(s.runnable_tasks_count for s in schedulers)
+        scheduler_count = len(schedulers)
+        avg_runnable = total_runnable / scheduler_count if scheduler_count > 0 else 0.0
+        cpu_pressure = total_runnable > 0
+
+        # Build interpretation
+        if cpu_pressure:
+            interpretation = (
+                f"CPU PRESSURE DETECTED: {total_runnable} task(s) waiting for CPU. "
+                f"Average {avg_runnable:.1f} runnable tasks per scheduler. "
+                "This indicates the server is CPU-constrained. Consider optimizing queries, "
+                "adding CPU resources, or reducing concurrent workload."
+            )
+        else:
+            interpretation = (
+                "No CPU pressure detected. All schedulers have 0 runnable tasks, "
+                "indicating adequate CPU resources for current workload."
+            )
+
+        logger.info(
+            f"Retrieved scheduler stats: {scheduler_count} schedulers, "
+            f"{total_runnable} total runnable tasks, CPU pressure: {cpu_pressure}"
+        )
+
+        return SchedulerStatsResponse(
+            schedulers=schedulers,
+            scheduler_count=scheduler_count,
+            total_runnable_tasks=total_runnable,
+            avg_runnable_per_scheduler=avg_runnable,
+            cpu_pressure_detected=cpu_pressure,
+            interpretation=interpretation,
+            success=True,
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting scheduler stats: {str(e)}")
+        return SchedulerStatsResponse(
+            schedulers=[],
+            scheduler_count=0,
+            total_runnable_tasks=0,
+            avg_runnable_per_scheduler=0.0,
+            cpu_pressure_detected=False,
+            interpretation="",
             success=False,
             error=str(e),
         )
