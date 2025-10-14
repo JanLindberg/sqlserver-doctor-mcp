@@ -7,32 +7,13 @@ A Model Context Protocol (MCP) server for SQL Server tuning, diagnostics, and pe
 Currently implemented tools:
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
+- **get_active_sessions** - Monitor currently executing queries with CPU usage, wait stats, and blocking information
 
 ## Prerequisites
 
 - Python 3.10 or higher
 - SQL Server (any edition)
 - ODBC Driver for SQL Server (Driver 17 recommended for macOS)
-
-### Installing ODBC Driver
-
-**macOS (recommended):**
-```bash
-brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-brew update
-brew install msodbcsql17 mssql-tools
-```
-
-**Linux (Ubuntu/Debian):**
-```bash
-curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-sudo apt-get update
-sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
-```
-
-**Windows:**
-Download and install from: https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server
 
 ## Installation
 
@@ -115,6 +96,14 @@ Once connected, Claude can use these tools:
 
 - **get_server_version()** - Returns SQL Server version and instance name
 - **list_databases()** - Returns list of all databases with metadata (name, state, recovery model, compatibility level)
+- **get_active_sessions()** - Returns currently executing queries with detailed performance metrics:
+  - SQL query text
+  - Session ID, status, and command type
+  - CPU time and elapsed time
+  - Disk reads and logical reads
+  - Wait time and wait type
+  - Blocking session information
+  - Client host, program, and login details
 
 ### Example Usage
 
@@ -122,62 +111,11 @@ Ask Claude:
 - "What version of SQL Server am I running?"
 - "List all databases on my SQL Server"
 - "Which databases are using FULL recovery model?"
+- "Show me what queries are currently running"
+- "Are there any blocked sessions right now?"
+- "Which query is using the most CPU?"
+- "What is session 52 currently executing?"
 
-## Troubleshooting
-
-### "spawn python ENOENT" error
-
-This means the Python executable can't be found. Make sure you're using the full path to your venv's Python in the MCP configuration.
-
-Find your Python path:
-```bash
-# macOS/Linux
-which python3
-
-# Windows
-where python
-```
-
-### "Can't open lib 'ODBC Driver XX for SQL Server'"
-
-The ODBC driver isn't installed or the driver name in `.env` doesn't match.
-
-Check installed drivers:
-```bash
-# macOS/Linux
-odbcinst -q -d
-
-# Windows
-Get-OdbcDriver
-```
-
-Update `SQL_SERVER_DRIVER` in your `.env` file to match an installed driver.
-
-### Connection fails
-
-Check your SQL Server connection settings:
-1. Verify SQL Server is running and accessible
-2. Check firewall settings (port 1433)
-3. Verify credentials in `.env` file
-4. Check SQL Server authentication mode (SQL Server and Windows Authentication mode)
-
-## Development
-
-### Running Tests
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
-### Code Formatting
-```bash
-black .
-```
-
-### Type Checking
-```bash
-mypy src
-```
 
 ## Project Structure
 
