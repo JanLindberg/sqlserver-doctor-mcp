@@ -1,6 +1,20 @@
 # SQL Server Doctor MCP Server
 
-A Model Context Protocol (MCP) server for SQL Server tuning, diagnostics, and performance analysis. This server exposes SQL Server management capabilities to LLM applications like Claude Code.
+A Model Context Protocol (MCP) server for SQL Server tuning, diagnostics, and performance analysis. This server exposes SQL Server management capabilities to LLM applications.
+
+### Example Usage
+
+Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
+
+**General troubleshooting:**
+- "Users are complaining about slow queries, what's happening?"
+- "Is something blocking my database?"
+
+**Specific diagnostics:**
+- "What queries are currently running?"
+- "Which query is using the most CPU?"
+- "Is there CPU pressure on the server?"
+- "Show me any blocked sessions"
 
 ## Features
 
@@ -111,21 +125,6 @@ Once connected, Claude can use these tools:
   - Pending I/O operations
   - CPU pressure detection (tasks waiting for CPU)
   - Automatic interpretation of results
-
-### Example Usage
-
-Ask Claude:
-- "What version of SQL Server am I running?"
-- "List all databases on my SQL Server"
-- "Which databases are using FULL recovery model?"
-- "Show me what queries are currently running"
-- "Are there any blocked sessions right now?"
-- "Which query is using the most CPU?"
-- "What is session 52 currently executing?"
-- "Is there CPU pressure on the server?"
-- "Check the CPU queue depth"
-- "Are tasks waiting for CPU resources?"
-
 
 ## Project Structure
 

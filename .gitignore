@@ -51,3 +51,7 @@ dmypy.json
 
 # Logs
 *.log
+
+# Claude Code
+.claude/
+CLAUDE.md
