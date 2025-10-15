@@ -264,19 +264,16 @@ def get_active_sessions() -> ActiveSessionsResponse:
 @mcp.tool()
 def get_scheduler_stats() -> SchedulerStatsResponse:
     """
-    Get SQL Server scheduler statistics for CPU queue monitoring.
+    Get SQL Server scheduler statistics for CPU and Disk IO queue monitoring. Used for preassure detection.
 
-    Returns detailed scheduler information including runnable task counts (CPU queue depth),
-    work queue counts, and pending I/O operations. This is critical for identifying CPU
-    pressure and performance bottlenecks.
+    Returns average scheduler information including runnable tasks (CPU queue depth) and pending I/O operations. 
+    This is critical for identifying CPU pressure and performance bottlenecks.
 
     Key metrics interpretation:
-    - runnable_tasks_count > 0: Tasks are waiting for CPU (CPU pressure indicator)
-    - Sustained runnable_tasks_count > 0: Indicates CPU bottleneck
-    - work_queue_count: Pending work items
-    - pending_disk_io_count: I/O operations waiting
+    - scheduler_count: Number of schedulers (typically = CPU cores)
+    - avg_runnable_tasks: Average runnable tasks per scheduler. 0 - 0.5: No CPU pressure, 0.5-2: Mild pressure, 2-5: Moderate pressure, >5: Critical, immediate action needed
+    - avg_pending_disk_io_count: Average pending I/O operations per scheduler. 0-1: Normal I/O activity, 1-5: Moderate I/O pressure, 5-10: High I/O pressure, >10: Critical I/O bottleneck, check disk subsystem
 
-    Rule of thumb: Healthy systems typically have runnable_tasks_count = 0.
     """
     logger.info("Tool called: get_scheduler_stats")
     try:
@@ -284,45 +281,61 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
         results = conn.execute_query(
             """
             SELECT
-                scheduler_id,
-                current_tasks_count,
-                runnable_tasks_count,
-                work_queue_count,
-                pending_disk_io_count
+                COUNT(*) AS scheduler_count,
+                AVG(1.0*runnable_tasks_count) AS avg_runnable_tasks,
+                AVG(1.0*pending_disk_io_count) AS avg_pending_disk_io_count
             FROM sys.dm_os_schedulers
             WHERE scheduler_id < 255
             """
         )
 
-        schedulers = [SchedulerStats(**sched) for sched in results]
+        # Extract aggregated metrics from single result row
+        if not results:
+            raise Exception("No scheduler statistics returned")
 
-        # Calculate aggregate metrics
-        total_runnable = sum(s.runnable_tasks_count for s in schedulers)
-        scheduler_count = len(schedulers)
-        avg_runnable = total_runnable / scheduler_count if scheduler_count > 0 else 0.0
-        cpu_pressure = total_runnable > 0
+        result = results[0]
+        scheduler_count = result["scheduler_count"]
+        avg_runnable = float(result["avg_runnable_tasks"])
+        avg_pending_io = float(result["avg_pending_disk_io_count"])
 
-        # Build interpretation
-        if cpu_pressure:
-            interpretation = (
-                f"CPU PRESSURE DETECTED: {total_runnable} task(s) waiting for CPU. "
-                f"Average {avg_runnable:.1f} runnable tasks per scheduler. "
-                "This indicates the server is CPU-constrained. Consider optimizing queries, "
-                "adding CPU resources, or reducing concurrent workload."
-            )
+        # Calculate total runnable tasks (approximate from average)
+        total_runnable = int(avg_runnable * scheduler_count)
+        cpu_pressure = avg_runnable > 0
+
+        # Build interpretation based on updated metrics
+        interpretation_parts = []
+
+        # CPU pressure interpretation
+        if avg_runnable == 0:
+            interpretation_parts.append("No CPU pressure detected (avg runnable: 0)")
+        elif avg_runnable <= 0.5:
+            interpretation_parts.append(f"Minimal CPU pressure (avg runnable: {avg_runnable:.2f})")
+        elif avg_runnable <= 2:
+            interpretation_parts.append(f"MILD CPU PRESSURE (avg runnable: {avg_runnable:.2f})")
+        elif avg_runnable <= 5:
+            interpretation_parts.append(f"MODERATE CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Consider query optimization")
         else:
-            interpretation = (
-                "No CPU pressure detected. All schedulers have 0 runnable tasks, "
-                "indicating adequate CPU resources for current workload."
-            )
+            interpretation_parts.append(f"CRITICAL CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Immediate action needed!")
+
+        # I/O pressure interpretation
+        if avg_pending_io <= 1:
+            interpretation_parts.append(f"Normal I/O activity (avg pending I/O: {avg_pending_io:.2f})")
+        elif avg_pending_io <= 5:
+            interpretation_parts.append(f"MODERATE I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f})")
+        elif avg_pending_io <= 10:
+            interpretation_parts.append(f"HIGH I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f}) - Check disk performance")
+        else:
+            interpretation_parts.append(f"CRITICAL I/O BOTTLENECK (avg pending I/O: {avg_pending_io:.2f}) - Check disk subsystem immediately!")
+
+        interpretation = " | ".join(interpretation_parts)
 
         logger.info(
             f"Retrieved scheduler stats: {scheduler_count} schedulers, "
-            f"{total_runnable} total runnable tasks, CPU pressure: {cpu_pressure}"
+            f"avg runnable: {avg_runnable:.2f}, avg pending I/O: {avg_pending_io:.2f}"
         )
 
         return SchedulerStatsResponse(
-            schedulers=schedulers,
+            schedulers=[],  # Empty list since we're returning aggregates
             scheduler_count=scheduler_count,
             total_runnable_tasks=total_runnable,
             avg_runnable_per_scheduler=avg_runnable,
