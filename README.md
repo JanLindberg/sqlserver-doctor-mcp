@@ -131,9 +131,9 @@ Copy `connections.json.example` to `connections.json` and define your named conn
 
 The `"default"` field sets which connection is active on startup. Use `set_active_connection` to switch at runtime, or pass `connection_name` to any tool for a one-off override.
 
-### Single connection (legacy)
+### Single connection (environment variables)
 
-Alternatively, copy `.env.example` to `.env` for a single connection:
+For a single connection, copy `.env.example` to `.env` or set the equivalent environment variables directly in your shell/system. The server reads these variables via `python-dotenv`, so both `.env` files and system environment variables work:
 
    **For SQL Server Authentication:**
    ```env
