@@ -18,6 +18,9 @@ from sqlserver_doctor.server import (
     set_active_connection,
     _validate_select_query,
     _serialize_value,
+    _simplify_execution_plan_xml,
+    _strip_element,
+    _SHOWPLAN_NS,
     ServerVersionResponse,
     DatabaseListResponse,
     ActiveSessionsResponse,
@@ -998,3 +1001,239 @@ class TestSetActiveConnection:
         assert isinstance(result, SetActiveConnectionResponse)
         assert result.success is False
         assert "not found" in result.error
+
+
+# Sample ShowPlan XML for testing simplification
+_SAMPLE_SHOWPLAN_XML = f"""<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="{_SHOWPLAN_NS}" Version="1.0" Build="16.0.1000.6">
+  <BatchSequence>
+    <Batch>
+      <Statements>
+        <StmtSimple StatementText="SELECT * FROM Orders WHERE OrderID = 1"
+                    StatementId="1" StatementEstRows="1"
+                    StatementOptmLevel="FULL" StatementSubTreeCost="0.003">
+          <StatementSetOptions QUOTED_IDENTIFIER="true" ARITHABORT="true"
+                               ANSI_NULLS="true" ANSI_WARNINGS="true" />
+          <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1"
+                     CompileMemory="128">
+            <MissingIndexes>
+              <MissingIndexGroup Impact="95.5">
+                <MissingIndex Database="[TestDB]" Schema="[dbo]" Table="[Orders]">
+                  <ColumnGroup Usage="EQUALITY">
+                    <Column Name="[OrderID]" ColumnId="1" />
+                  </ColumnGroup>
+                  <ColumnGroup Usage="INCLUDE">
+                    <Column Name="[CustomerName]" ColumnId="2" />
+                  </ColumnGroup>
+                </MissingIndex>
+              </MissingIndexGroup>
+            </MissingIndexes>
+            <MemoryGrantInfo SerialRequiredMemory="0" SerialDesiredMemory="0" />
+            <OptimizerHardwareDependentProperties EstimatedAvailableMemoryGrant="1024"
+                                                   EstimatedPagesCached="512"
+                                                   EstimatedAvailableDegreeOfParallelism="4" />
+            <RelOp NodeId="0" PhysicalOp="Clustered Index Scan" LogicalOp="Clustered Index Scan"
+                   EstimateRows="1" EstimateCPU="0.001" EstimateIO="0.002"
+                   EstimatedTotalSubtreeCost="0.003"
+                   AvgRowSize="100" EstimatedRowsRead="1000" TableCardinality="50000"
+                   Parallel="false" EstimateRebinds="0" EstimateRewinds="0">
+              <OutputList>
+                <ColumnReference Database="[TestDB]" Schema="[dbo]" Table="[Orders]"
+                                 Column="OrderID" />
+                <ColumnReference Database="[TestDB]" Schema="[dbo]" Table="[Orders]"
+                                 Column="CustomerName" />
+              </OutputList>
+              <RunTimeInformation>
+                <RunTimeCountersPerThread Thread="0" ActualRows="1"
+                                          ActualElapsedms="5" ActualCPUms="2"
+                                          ActualLogicalReads="10" ActualPhysicalReads="1"
+                                          ActualReadAheads="0" ActualLobLogicalReads="0"
+                                          ActualLobPhysicalReads="0" />
+              </RunTimeInformation>
+              <Warnings>
+                <ColumnsWithNoStatistics>
+                  <ColumnReference Database="[TestDB]" Schema="[dbo]" Table="[Orders]"
+                                   Column="OrderDate" />
+                </ColumnsWithNoStatistics>
+              </Warnings>
+              <IndexScan Ordered="true" ScanDirection="FORWARD" ForcedIndex="false"
+                         ForceSeek="false" NoExpandHint="false">
+                <DefinedValues>
+                  <DefinedValue>
+                    <ColumnReference Database="[TestDB]" Schema="[dbo]" Table="[Orders]"
+                                     Column="OrderID" />
+                  </DefinedValue>
+                </DefinedValues>
+                <Object Database="[TestDB]" Schema="[dbo]" Table="[Orders]"
+                        Index="[PK_Orders]" IndexKind="Clustered"
+                        Storage="RowStore" />
+                <SeekPredicates>
+                  <SeekPredicateNew>
+                    <SeekKeys>
+                      <Prefix ScanType="EQ">
+                        <RangeColumns>
+                          <ColumnReference Database="[TestDB]" Schema="[dbo]"
+                                           Table="[Orders]" Column="OrderID" />
+                        </RangeColumns>
+                        <RangeExpressions>
+                          <ScalarOperator ScalarString="(1)">
+                            <Const ConstValue="(1)" />
+                          </ScalarOperator>
+                        </RangeExpressions>
+                      </Prefix>
+                    </SeekKeys>
+                  </SeekPredicateNew>
+                </SeekPredicates>
+                <Predicate>
+                  <ScalarOperator ScalarString="[TestDB].[dbo].[Orders].[OrderID]=(1)">
+                    <Compare CompareOp="EQ">
+                      <ScalarOperator>
+                        <Identifier>
+                          <ColumnReference Database="[TestDB]" Schema="[dbo]"
+                                           Table="[Orders]" Column="OrderID" />
+                        </Identifier>
+                      </ScalarOperator>
+                      <ScalarOperator>
+                        <Const ConstValue="(1)" />
+                      </ScalarOperator>
+                    </Compare>
+                  </ScalarOperator>
+                </Predicate>
+              </IndexScan>
+            </RelOp>
+            <ParameterList>
+              <ColumnReference Column="@1" ParameterDataType="int"
+                               ParameterCompiledValue="(1)" />
+            </ParameterList>
+          </QueryPlan>
+        </StmtSimple>
+      </Statements>
+    </Batch>
+  </BatchSequence>
+</ShowPlanXML>"""
+
+
+class TestSimplifyExecutionPlanXml:
+    """Tests for _simplify_execution_plan_xml function."""
+
+    import xml.etree.ElementTree as ET
+
+    def test_removes_verbose_elements(self):
+        """Test that verbose elements are removed from the XML."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+
+        # These should be removed
+        assert "StatementSetOptions" not in result
+        assert "OptimizerHardwareDependentProperties" not in result
+        assert "OutputList" not in result
+        assert "DefinedValues" not in result
+        assert "ParameterList" not in result
+        assert "SeekPredicates" not in result
+        assert "Predicate" not in result
+        assert "ScalarOperator" not in result
+
+    def test_preserves_diagnostic_elements(self):
+        """Test that diagnostically useful elements are preserved."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+
+        # These should be preserved
+        assert "MissingIndexGroup" in result
+        assert "MissingIndex" in result
+        assert "ColumnGroup" in result
+        assert 'Usage="EQUALITY"' in result
+        assert 'Usage="INCLUDE"' in result
+        assert "Warnings" in result
+        assert "ColumnsWithNoStatistics" in result
+        assert "RunTimeCountersPerThread" in result
+        assert "RunTimeInformation" in result
+        assert "MemoryGrantInfo" in result
+
+    def test_preserves_relop_key_attributes(self):
+        """Test that RelOp keeps only useful attributes."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+        root = self.ET.fromstring(result)
+        ns = {"p": _SHOWPLAN_NS}
+
+        relop = root.find(".//p:RelOp", ns)
+        assert relop is not None
+
+        # Key attributes should be present
+        assert relop.get("PhysicalOp") == "Clustered Index Scan"
+        assert relop.get("LogicalOp") == "Clustered Index Scan"
+        assert relop.get("EstimateRows") == "1"
+        assert relop.get("NodeId") == "0"
+        assert relop.get("EstimatedTotalSubtreeCost") == "0.003"
+
+        # Verbose attributes should be removed
+        assert relop.get("AvgRowSize") is None
+        assert relop.get("EstimatedRowsRead") is None
+        assert relop.get("TableCardinality") is None
+        assert relop.get("Parallel") is None
+        assert relop.get("EstimateRebinds") is None
+        assert relop.get("EstimateRewinds") is None
+
+    def test_preserves_object_with_filtered_attrs(self):
+        """Test that Object elements keep only useful attributes."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+        root = self.ET.fromstring(result)
+        ns = {"p": _SHOWPLAN_NS}
+
+        obj = root.find(".//p:Object", ns)
+        assert obj is not None
+        assert obj.get("Database") == "[TestDB]"
+        assert obj.get("Table") == "[Orders]"
+        assert obj.get("Index") == "[PK_Orders]"
+        assert obj.get("IndexKind") == "Clustered"
+        # Storage should be removed
+        assert obj.get("Storage") is None
+
+    def test_size_reduction(self):
+        """Test that simplified XML is significantly smaller."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+        assert len(result) < len(_SAMPLE_SHOWPLAN_XML) * 0.7  # At least 30% smaller
+
+    def test_invalid_xml_returns_original(self):
+        """Test that invalid XML is returned unchanged (fail-safe)."""
+        bad_xml = "<not valid xml!!!"
+        result = _simplify_execution_plan_xml(bad_xml)
+        assert result == bad_xml
+
+    def test_downstream_missing_indexes_compatibility(self):
+        """Test that simplified XML is still parseable for missing index extraction."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+        root = self.ET.fromstring(result)
+        ns = {"p": _SHOWPLAN_NS}
+
+        # This is the same XPath used by analyze_missing_indexes
+        missing_groups = root.findall(".//p:MissingIndexGroup", ns)
+        assert len(missing_groups) == 1
+        assert float(missing_groups[0].get("Impact")) == 95.5
+
+        missing_index = missing_groups[0].find(".//p:MissingIndex", ns)
+        assert missing_index is not None
+        assert missing_index.get("Table") == "[Orders]"
+
+        col_groups = missing_index.findall(".//p:ColumnGroup", ns)
+        assert len(col_groups) == 2
+
+    def test_downstream_antipatterns_compatibility(self):
+        """Test that simplified XML is still parseable for antipattern detection."""
+        result = _simplify_execution_plan_xml(_SAMPLE_SHOWPLAN_XML)
+        root = self.ET.fromstring(result)
+
+        # These are the same XPaths used by detect_query_antipatterns
+        warnings = root.findall(
+            f".//{{{_SHOWPLAN_NS}}}Warnings"
+        )
+        assert len(warnings) == 1
+
+        no_stats = root.findall(
+            f".//{{{_SHOWPLAN_NS}}}ColumnsWithNoStatistics"
+        )
+        assert len(no_stats) == 1
+
+        relops = root.findall(
+            f".//{{{_SHOWPLAN_NS}}}RelOp"
+        )
+        assert len(relops) == 1
+        assert "Scan" in relops[0].get("LogicalOp", "")

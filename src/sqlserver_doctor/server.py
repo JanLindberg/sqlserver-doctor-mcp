@@ -261,7 +261,10 @@ class AnalyzeQueryExecutionResponse(BaseModel):
     execution_metrics: ExecutionMetrics | None = Field(
         None, description="Execution performance metrics"
     )
-    execution_plan_xml: str | None = Field(None, description="Full ShowPlanXML execution plan")
+    execution_plan_xml: str | None = Field(
+        None,
+        description="Simplified ShowPlanXML execution plan (verbose elements removed to reduce size)",
+    )
     execution_plan_summary: ExecutionPlanSummary | None = Field(
         None, description="Summary of execution plan"
     )
@@ -1222,6 +1225,107 @@ def _parse_runtime_stats_from_plan(plan_xml: str) -> dict | None:
         return None
 
 
+# --- ShowPlan XML simplification ---
+
+_SHOWPLAN_NS = "http://schemas.microsoft.com/sqlserver/2004/07/showplan"
+
+# Elements to remove entirely (including all children)
+_ELEMENTS_TO_REMOVE = {
+    f"{{{_SHOWPLAN_NS}}}StatementSetOptions",
+    f"{{{_SHOWPLAN_NS}}}OptimizerHardwareDependentProperties",
+    f"{{{_SHOWPLAN_NS}}}OutputList",
+    f"{{{_SHOWPLAN_NS}}}DefinedValues",
+    f"{{{_SHOWPLAN_NS}}}ParameterList",
+    f"{{{_SHOWPLAN_NS}}}UDF",
+    f"{{{_SHOWPLAN_NS}}}InternalInfo",
+    f"{{{_SHOWPLAN_NS}}}ThreadStat",
+    f"{{{_SHOWPLAN_NS}}}OptimizerStatsUsage",
+    f"{{{_SHOWPLAN_NS}}}SeekPredicates",
+    f"{{{_SHOWPLAN_NS}}}Predicate",
+    f"{{{_SHOWPLAN_NS}}}ScalarOperator",
+    f"{{{_SHOWPLAN_NS}}}WaitStats",
+}
+
+# RelOp attributes to keep (all others stripped)
+_RELOP_KEEP_ATTRS = {
+    "NodeId",
+    "PhysicalOp",
+    "LogicalOp",
+    "EstimateRows",
+    "EstimateCPU",
+    "EstimateIO",
+    "EstimatedTotalSubtreeCost",
+}
+
+# Object element attributes to keep
+_OBJECT_KEEP_ATTRS = {
+    "Database",
+    "Schema",
+    "Table",
+    "Index",
+    "IndexKind",
+    "Alias",
+}
+
+
+def _strip_element(element: ET.Element) -> None:
+    """Recursively strip unwanted children and attributes from a ShowPlan XML element."""
+    to_remove = []
+    for child in element:
+        if child.tag in _ELEMENTS_TO_REMOVE:
+            to_remove.append(child)
+        else:
+            _strip_element(child)
+
+    for child in to_remove:
+        element.remove(child)
+
+    # Filter RelOp attributes to only the useful ones
+    if element.tag == f"{{{_SHOWPLAN_NS}}}RelOp":
+        attrs_to_remove = [k for k in element.attrib if k not in _RELOP_KEEP_ATTRS]
+        for attr in attrs_to_remove:
+            del element.attrib[attr]
+
+    # Filter Object element attributes
+    if element.tag == f"{{{_SHOWPLAN_NS}}}Object":
+        attrs_to_remove = [k for k in element.attrib if k not in _OBJECT_KEEP_ATTRS]
+        for attr in attrs_to_remove:
+            del element.attrib[attr]
+
+
+def _simplify_execution_plan_xml(plan_xml: str) -> str:
+    """
+    Simplify ShowPlan XML by removing verbose elements while preserving diagnostic value.
+
+    Strips out elements like OutputList, DefinedValues, ScalarOperator trees,
+    StatementSetOptions, etc. that add bulk without helping LLM analysis.
+    Preserves MissingIndexes, Warnings, RelOp structure, RunTimeInformation,
+    and Object references needed by downstream tools.
+
+    Returns the original XML unchanged if parsing fails (fail-safe).
+    """
+    try:
+        ET.register_namespace("", _SHOWPLAN_NS)
+        root = ET.fromstring(plan_xml)
+
+        _strip_element(root)
+
+        simplified = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+
+        original_len = len(plan_xml)
+        simplified_len = len(simplified)
+        reduction = (1 - simplified_len / original_len) * 100 if original_len > 0 else 0
+        logger.info(
+            f"Simplified execution plan XML: {original_len} -> {simplified_len} chars "
+            f"({reduction:.0f}% reduction)"
+        )
+
+        return simplified
+    except Exception as e:
+        logger.warning(f"Failed to simplify execution plan XML, returning original: {e}")
+        return plan_xml
+
+
 @mcp.tool()
 def analyze_query_execution(
     query: str,
@@ -1443,13 +1547,18 @@ def analyze_query_execution(
         # Wait statistics not captured - would need sys.dm_os_wait_stats correlation
         wait_statistics = None
 
+        # Simplify execution plan XML to reduce context size for LLM consumers
+        simplified_plan_xml = None
+        if execution_plan_xml:
+            simplified_plan_xml = _simplify_execution_plan_xml(execution_plan_xml)
+
         logger.info(
             f"Query executed in {execution_time_ms}ms, returned {len(results) if results else 0} rows"
         )
 
         return AnalyzeQueryExecutionResponse(
             execution_metrics=execution_metrics,
-            execution_plan_xml=execution_plan_xml,
+            execution_plan_xml=simplified_plan_xml,
             execution_plan_summary=execution_plan_summary,
             wait_statistics=wait_statistics,
             bottleneck_type=bottleneck_type,
