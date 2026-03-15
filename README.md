@@ -48,6 +48,10 @@ Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 
 Currently implemented tools:
 
+**Connection Management:**
+- **list_connections** - List all configured connections and show which is active
+- **set_active_connection** - Switch the active connection at runtime
+
 **Server & Database Management:**
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
@@ -93,12 +97,43 @@ Currently implemented tools:
 
 ## Configuration
 
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
+### Multiple connections (recommended)
 
-2. Edit `.env` with your SQL Server connection details:
+Copy `connections.json.example` to `connections.json` and define your named connections:
+
+```json
+{
+  "default": "PRD",
+  "connections": {
+    "DEV": {
+      "host": "dev-server\\INSTANCE",
+      "port": "1433",
+      "database": "MyDatabase",
+      "user": "",
+      "password": "",
+      "driver": "ODBC Driver 17 for SQL Server",
+      "trust_cert": "yes",
+      "encrypt": "no"
+    },
+    "PRD": {
+      "host": "prod-server\\INSTANCE",
+      "port": "1433",
+      "database": "MyDatabase",
+      "user": "",
+      "password": "",
+      "driver": "ODBC Driver 17 for SQL Server",
+      "trust_cert": "yes",
+      "encrypt": "no"
+    }
+  }
+}
+```
+
+The `"default"` field sets which connection is active on startup. Use `set_active_connection` to switch at runtime, or pass `connection_name` to any tool for a one-off override.
+
+### Single connection (legacy)
+
+Alternatively, copy `.env.example` to `.env` for a single connection:
 
    **For SQL Server Authentication:**
    ```env
@@ -151,6 +186,8 @@ Currently implemented tools:
 
 Once connected, Claude can use these tools:
 
+- **list_connections()** - Lists all configured connections and shows which is active
+- **set_active_connection(connection_name)** - Switches the active connection used by all tools
 - **get_server_version()** - Returns SQL Server version and instance name
 - **list_databases()** - Returns list of all databases with metadata (name, state, recovery model, compatibility level)
 - **get_server_configurations()** - Returns configuration diagnostics and recommendations:
@@ -356,7 +393,8 @@ sqlserver-doctor-mcp/
 │           └── logger.py      # Logging configuration
 ├── tests/                     # Unit and integration tests
 ├── pyproject.toml            # Project configuration
-├── .env.example              # Example environment variables
+├── connections.json.example  # Example multi-connection config
+├── .env.example              # Example environment variables (single connection)
 ├── run_tests.bat             # Run tests (Windows)
 └── README.md
 ```

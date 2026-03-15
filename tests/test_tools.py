@@ -4,7 +4,8 @@ import pytest
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
-from sqlserver_doctor.utils.connection import get_connection
+import sqlserver_doctor.utils.connection as conn_module
+from sqlserver_doctor.utils.connection import get_connection, SQLServerConnection
 from sqlserver_doctor.server import (
     get_server_version,
     list_databases,
@@ -13,6 +14,8 @@ from sqlserver_doctor.server import (
     get_server_configurations,
     get_memory_stats,
     execute_select_query,
+    list_connections,
+    set_active_connection,
     _validate_select_query,
     _serialize_value,
     ServerVersionResponse,
@@ -22,6 +25,8 @@ from sqlserver_doctor.server import (
     ServerConfigResponse,
     MemoryStatsResponse,
     ExecuteSelectQueryResponse,
+    ConnectionListResponse,
+    SetActiveConnectionResponse,
     ConfigSeverity,
 )
 
@@ -781,11 +786,10 @@ sql_server_available = pytest.mark.skipif(
 )
 
 
-def _reset_connection_singleton():
-    """Reset the global connection singleton so it picks up real .env values."""
-    import sqlserver_doctor.utils.connection as conn_module
-
-    conn_module._connection = None
+def _reset_connection_registry():
+    """Reset the connection registry so it picks up real .env values."""
+    conn_module._connections.clear()
+    conn_module._active_connection_name = None
 
 
 class TestExecuteSelectQuery:
@@ -793,7 +797,7 @@ class TestExecuteSelectQuery:
 
     def setup_method(self):
         """Reset connection singleton before each test to undo env patches from other tests."""
-        _reset_connection_singleton()
+        _reset_connection_registry()
 
     @sql_server_available
     def test_success(self):
@@ -856,9 +860,7 @@ class TestExecuteSelectQuery:
     @sql_server_available
     def test_cte_query(self):
         """Test WITH (CTE) queries work."""
-        result = execute_select_query(
-            query="WITH cte AS (SELECT 1 AS val) SELECT val FROM cte"
-        )
+        result = execute_select_query(query="WITH cte AS (SELECT 1 AS val) SELECT val FROM cte")
 
         assert result.success is True
         assert result.row_count == 1
@@ -923,3 +925,76 @@ class TestExecuteSelectQuery:
         """Test that comments are stripped before validation."""
         assert _validate_select_query("-- comment\nSELECT 1") is None
         assert _validate_select_query("/* comment */ SELECT 1") is None
+
+
+class TestListConnections:
+    """Tests for list_connections tool."""
+
+    def setup_method(self):
+        """Reset connection registry before each test."""
+        _reset_connection_registry()
+
+    def test_list_connections_default_env(self):
+        """Test listing connections when only env vars are configured."""
+        with patch.dict("os.environ", {}, clear=True):
+            result = list_connections()
+
+        assert isinstance(result, ConnectionListResponse)
+        assert result.success is True
+        assert len(result.connections) == 1
+        assert result.connections[0].name == "default"
+        assert result.active_connection == "default"
+
+    def test_list_connections_multiple(self):
+        """Test listing multiple configured connections."""
+        conn_module._connections["prod"] = SQLServerConnection(
+            name="prod", host="prod-host", user=""
+        )
+        conn_module._connections["staging"] = SQLServerConnection(
+            name="staging", host="staging-host", user="sa", password="pass"
+        )
+        conn_module._active_connection_name = "prod"
+
+        result = list_connections()
+
+        assert result.success is True
+        assert len(result.connections) == 2
+        assert result.active_connection == "prod"
+
+        names = [c.name for c in result.connections]
+        assert "prod" in names
+        assert "staging" in names
+
+        # Check active flag
+        for c in result.connections:
+            if c.name == "prod":
+                assert c.is_active is True
+            else:
+                assert c.is_active is False
+
+
+class TestSetActiveConnection:
+    """Tests for set_active_connection tool."""
+
+    def setup_method(self):
+        """Reset connection registry before each test."""
+        _reset_connection_registry()
+
+    def test_set_active_connection_success(self):
+        """Test setting active connection to a valid name."""
+        conn_module._connections["myconn"] = SQLServerConnection(name="myconn", host="myhost")
+
+        result = set_active_connection("myconn")
+
+        assert isinstance(result, SetActiveConnectionResponse)
+        assert result.success is True
+        assert result.connection_name == "myconn"
+        assert conn_module._active_connection_name == "myconn"
+
+    def test_set_active_connection_invalid(self):
+        """Test setting active connection to an invalid name."""
+        result = set_active_connection("nonexistent")
+
+        assert isinstance(result, SetActiveConnectionResponse)
+        assert result.success is False
+        assert "not found" in result.error

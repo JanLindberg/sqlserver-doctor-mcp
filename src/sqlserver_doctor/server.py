@@ -14,7 +14,12 @@ import pyodbc
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
-from sqlserver_doctor.utils.connection import get_connection
+from sqlserver_doctor.utils.connection import (
+    get_active_connection_name,
+    get_all_connections,
+    get_connection,
+    set_active_connection_name,
+)
 from sqlserver_doctor.utils.logger import setup_logger
 
 # Setup logger
@@ -500,18 +505,126 @@ def _serialize_value(value: Any) -> Any:
     return str(value)
 
 
+# Connection management models
+class ConnectionInfo(BaseModel):
+    """Information about a configured connection."""
+
+    name: str = Field(description="Connection name")
+    host: str = Field(description="Server host")
+    port: str = Field(description="Server port")
+    database: str = Field(description="Default database")
+    auth_type: str = Field(description="Authentication type (Windows or SQL Server)")
+    is_active: bool = Field(description="Whether this is the currently active connection")
+
+
+class ConnectionListResponse(BaseModel):
+    """Response model for listing connections."""
+
+    connections: list[ConnectionInfo] = Field(description="List of configured connections")
+    active_connection: str | None = Field(description="Name of the currently active connection")
+    success: bool = Field(description="Whether the operation was successful")
+    error: str | None = Field(None, description="Error message if operation failed")
+
+
+class SetActiveConnectionResponse(BaseModel):
+    """Response model for setting the active connection."""
+
+    connection_name: str = Field(description="Name of the connection that was set as active")
+    success: bool = Field(description="Whether the operation was successful")
+    error: str | None = Field(None, description="Error message if operation failed")
+
+
 # Tools
+
+
 @mcp.tool()
-def get_server_version() -> ServerVersionResponse:
+def list_connections() -> ConnectionListResponse:
+    """
+    List all configured SQL Server connections and show which is active.
+
+    Returns information about all connections configured in connections.json
+    or the default connection from environment variables.
+    """
+    logger.info("Tool called: list_connections")
+    try:
+        all_conns = get_all_connections()
+
+        # If no connections loaded yet, trigger default creation
+        if not all_conns:
+            get_connection()
+            all_conns = get_all_connections()
+
+        active_name = get_active_connection_name()
+
+        conn_list = []
+        for name, conn in all_conns.items():
+            auth_type = "SQL Server" if conn.user else "Windows"
+            conn_list.append(
+                ConnectionInfo(
+                    name=name,
+                    host=conn.host,
+                    port=conn.port,
+                    database=conn.database,
+                    auth_type=auth_type,
+                    is_active=(name == active_name),
+                )
+            )
+
+        return ConnectionListResponse(
+            connections=conn_list,
+            active_connection=active_name,
+            success=True,
+        )
+    except Exception as e:
+        logger.error(f"Error listing connections: {str(e)}")
+        return ConnectionListResponse(
+            connections=[],
+            active_connection=None,
+            success=False,
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def set_active_connection(connection_name: str) -> SetActiveConnectionResponse:
+    """
+    Set the active SQL Server connection used by all tools by default.
+
+    All subsequent tool calls will use this connection unless overridden
+    with the connection_name parameter.
+
+    Args:
+        connection_name: Name of the connection to set as active (from connections.json)
+    """
+    logger.info(f"Tool called: set_active_connection({connection_name})")
+    try:
+        set_active_connection_name(connection_name)
+        return SetActiveConnectionResponse(
+            connection_name=connection_name,
+            success=True,
+        )
+    except ValueError as e:
+        return SetActiveConnectionResponse(
+            connection_name=connection_name,
+            success=False,
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def get_server_version(connection_name: str | None = None) -> ServerVersionResponse:
     """
     Get SQL Server version and instance information.
 
     Returns detailed version information about the connected SQL Server instance,
     including the version string and server name.
+
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: get_server_version")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             SELECT
@@ -547,17 +660,20 @@ def get_server_version() -> ServerVersionResponse:
 
 
 @mcp.tool()
-def list_databases() -> DatabaseListResponse:
+def list_databases(connection_name: str | None = None) -> DatabaseListResponse:
     """
     List all databases on the SQL Server instance.
 
     Returns information about all databases including name, state, recovery model,
     and compatibility level. This is useful for understanding the server's database
     landscape and identifying databases that may need attention.
+
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: list_databases")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             SELECT
@@ -592,7 +708,7 @@ def list_databases() -> DatabaseListResponse:
 
 
 @mcp.tool()
-def get_active_sessions() -> ActiveSessionsResponse:
+def get_active_sessions(connection_name: str | None = None) -> ActiveSessionsResponse:
     """
     Get currently active sessions and queries on the SQL Server instance.
 
@@ -602,10 +718,13 @@ def get_active_sessions() -> ActiveSessionsResponse:
     and detecting blocking situations.
 
     Filters out system databases (master, msdb) and the monitoring query itself.
+
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: get_active_sessions")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             SELECT
@@ -655,7 +774,7 @@ def get_active_sessions() -> ActiveSessionsResponse:
 
 
 @mcp.tool()
-def get_scheduler_stats() -> SchedulerStatsResponse:
+def get_scheduler_stats(connection_name: str | None = None) -> SchedulerStatsResponse:
     """
     Get SQL Server scheduler statistics for CPU and Disk IO queue monitoring. Used for preassure detection.
 
@@ -667,10 +786,12 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
     - avg_runnable_tasks: Average runnable tasks per scheduler. 0 - 0.5: No CPU pressure, 0.5-2: Mild pressure, 2-5: Moderate pressure, >5: Critical, immediate action needed
     - avg_pending_disk_io_count: Average pending I/O operations per scheduler. 0-1: Normal I/O activity, 1-5: Moderate I/O pressure, 5-10: High I/O pressure, >10: Critical I/O bottleneck, check disk subsystem
 
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: get_scheduler_stats")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             SELECT
@@ -764,7 +885,7 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
 
 
 @mcp.tool()
-def get_server_configurations() -> ServerConfigResponse:
+def get_server_configurations(connection_name: str | None = None) -> ServerConfigResponse:
     """
     Get SQL Server configuration diagnostics and recommendations.
 
@@ -775,10 +896,13 @@ def get_server_configurations() -> ServerConfigResponse:
 
     Each configuration includes current value, severity assessment (OK, WARNING,
     CRITICAL, REVIEW, CONSIDER), contextual message, and actionable recommendations.
+
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: get_server_configurations")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             -- Max Server Memory Configuration
@@ -940,7 +1064,7 @@ def get_server_configurations() -> ServerConfigResponse:
 
 
 @mcp.tool()
-def get_memory_stats() -> MemoryStatsResponse:
+def get_memory_stats(connection_name: str | None = None) -> MemoryStatsResponse:
     """
     Get SQL Server memory statistics to identify memory pressure issues.
 
@@ -956,10 +1080,13 @@ def get_memory_stats() -> MemoryStatsResponse:
 
     This tool is essential for diagnosing if SQL Server needs more memory or if there
     are memory configuration issues.
+
+    Args:
+        connection_name: Optional connection name to use instead of the active connection
     """
     logger.info("Tool called: get_memory_stats")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
         results = conn.execute_query(
             """
             WITH memory_metrics AS (
@@ -1101,6 +1228,7 @@ def analyze_query_execution(
     database_name: str | None = None,
     include_actual_plan: bool = True,
     max_execution_time_seconds: int = 30,
+    connection_name: str | None = None,
 ) -> AnalyzeQueryExecutionResponse:
     """
     Capture baseline performance metrics and execution plan analysis.
@@ -1139,7 +1267,7 @@ def analyze_query_execution(
                 error="Only SELECT queries are allowed for analysis",
             )
 
-        conn = get_connection()
+        conn = get_connection(connection_name)
 
         # Build combined query to preserve database context
         # (Each execute_query() creates a new connection, so we must combine statements)
@@ -1347,7 +1475,10 @@ def analyze_query_execution(
 
 @mcp.tool()
 def get_query_statistics_health(
-    database_name: str, table_names: list[str] | None = None, execution_plan_xml: str | None = None
+    database_name: str,
+    table_names: list[str] | None = None,
+    execution_plan_xml: str | None = None,
+    connection_name: str | None = None,
 ) -> GetQueryStatisticsHealthResponse:
     """
     Check statistics freshness and quality for tables in a query.
@@ -1368,7 +1499,7 @@ def get_query_statistics_health(
     """
     logger.info("Tool called: get_query_statistics_health")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
 
         # If no table names provided, try to extract from execution plan
         if not table_names and execution_plan_xml:
@@ -1527,7 +1658,9 @@ def get_query_statistics_health(
 
 @mcp.tool()
 def analyze_missing_indexes(
-    database_name: str, execution_plan_xml: str | None = None
+    database_name: str,
+    execution_plan_xml: str | None = None,
+    connection_name: str | None = None,
 ) -> AnalyzeMissingIndexesResponse:
     """
     Analyze missing index recommendations and existing index usage for a database.
@@ -1548,7 +1681,7 @@ def analyze_missing_indexes(
     """
     logger.info("Tool called: analyze_missing_indexes")
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
 
         # Query missing indexes from DMVs
         missing_indexes_query = f"""
@@ -2009,7 +2142,9 @@ def detect_query_antipatterns(
 
 
 @mcp.tool()
-def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
+def find_object_database(
+    object_name: str, connection_name: str | None = None
+) -> FindObjectDatabaseResponse:
     """
     Find which database contains a specific table or view.
 
@@ -2029,7 +2164,7 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
     logger.info(f"Tool called: find_object_database with object_name={object_name}")
 
     try:
-        conn = get_connection()
+        conn = get_connection(connection_name)
 
         # Parse object name into parts
         parts = [p.strip().strip("[]") for p in object_name.split(".")]
@@ -2158,6 +2293,7 @@ def execute_select_query(
     database_name: str | None = None,
     row_limit: int = 100,
     timeout_seconds: int = 30,
+    connection_name: str | None = None,
 ) -> ExecuteSelectQueryResponse:
     """
     Execute a SELECT query and return the result set with column metadata.
@@ -2204,7 +2340,7 @@ def execute_select_query(
         combined_query = "\n".join(query_parts)
 
         # Execute with manual connection for cursor.description access
-        conn = get_connection()
+        conn = get_connection(connection_name)
         conn_str = conn.get_connection_string()
 
         start_time = time.time()

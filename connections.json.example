@@ -1,0 +1,25 @@
+{
+  "default": "local",
+  "connections": {
+    "local": {
+      "host": "localhost",
+      "port": 1433,
+      "database": "master",
+      "user": "",
+      "password": "",
+      "driver": "ODBC Driver 17 for SQL Server",
+      "trust_cert": "yes",
+      "encrypt": "no"
+    },
+    "staging": {
+      "host": "staging-server.example.com",
+      "port": 1433,
+      "database": "master",
+      "user": "sa",
+      "password": "YourPasswordHere",
+      "driver": "ODBC Driver 17 for SQL Server",
+      "trust_cert": "yes",
+      "encrypt": "no"
+    }
+  }
+}
