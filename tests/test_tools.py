@@ -1,6 +1,10 @@
 """Tests for MCP server tools."""
 
+import pytest
+from datetime import datetime
+from decimal import Decimal
 from unittest.mock import patch, MagicMock
+from sqlserver_doctor.utils.connection import get_connection
 from sqlserver_doctor.server import (
     get_server_version,
     list_databases,
@@ -8,12 +12,16 @@ from sqlserver_doctor.server import (
     get_scheduler_stats,
     get_server_configurations,
     get_memory_stats,
+    execute_select_query,
+    _validate_select_query,
+    _serialize_value,
     ServerVersionResponse,
     DatabaseListResponse,
     ActiveSessionsResponse,
     SchedulerStatsResponse,
     ServerConfigResponse,
     MemoryStatsResponse,
+    ExecuteSelectQueryResponse,
     ConfigSeverity,
 )
 
@@ -745,3 +753,173 @@ class TestGetMemoryStats:
         assert result.success is False
         assert result.memory_stats is None
         assert "Insufficient permissions" in result.error
+
+
+def _sql_server_reachable():
+    """Check if SQL Server is reachable using .env connection settings (5s timeout)."""
+    import pyodbc
+    from sqlserver_doctor.utils.connection import SQLServerConnection
+
+    try:
+        # Create a fresh connection instance (don't use singleton which may be corrupted by tests)
+        conn = SQLServerConnection()
+        conn_str = conn.get_connection_string()
+        with pyodbc.connect(conn_str, timeout=5) as db_conn:
+            cursor = db_conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        return True
+    except Exception:
+        return False
+
+
+_is_reachable = _sql_server_reachable()
+
+sql_server_available = pytest.mark.skipif(
+    not _is_reachable,
+    reason="SQL Server not reachable (check .env connection settings)",
+)
+
+
+def _reset_connection_singleton():
+    """Reset the global connection singleton so it picks up real .env values."""
+    import sqlserver_doctor.utils.connection as conn_module
+
+    conn_module._connection = None
+
+
+class TestExecuteSelectQuery:
+    """Tests for execute_select_query tool (integration tests using .env connection)."""
+
+    def setup_method(self):
+        """Reset connection singleton before each test to undo env patches from other tests."""
+        _reset_connection_singleton()
+
+    @sql_server_available
+    def test_success(self):
+        """Test successful SELECT query against real database."""
+        result = execute_select_query(
+            query="SELECT name, database_id FROM sys.databases WHERE name = 'master'"
+        )
+
+        assert isinstance(result, ExecuteSelectQueryResponse)
+        assert result.success is True
+        assert result.row_count == 1
+        assert result.truncated is False
+        assert len(result.columns) == 2
+        assert result.columns[0].name == "name"
+        assert result.columns[1].name == "database_id"
+        assert result.rows[0]["name"] == "master"
+        assert result.rows[0]["database_id"] == 1
+        assert result.error is None
+        assert result.execution_time_ms >= 0
+
+    @sql_server_available
+    def test_with_database(self):
+        """Test query execution with database context."""
+        result = execute_select_query(
+            query="SELECT TOP 1 name FROM sys.tables",
+            database_name="master",
+        )
+
+        assert result.success is True
+        assert len(result.columns) == 1
+        assert result.columns[0].name == "name"
+
+    @sql_server_available
+    def test_multiple_rows(self):
+        """Test query returning multiple rows."""
+        result = execute_select_query(
+            query="SELECT name, database_id FROM sys.databases ORDER BY database_id",
+            row_limit=5,
+        )
+
+        assert result.success is True
+        assert result.row_count >= 1
+        assert result.row_count <= 5
+        # master is always database_id 1
+        assert result.rows[0]["name"] == "master"
+
+    @sql_server_available
+    def test_row_limit_truncation(self):
+        """Test that results are truncated when exceeding row_limit."""
+        result = execute_select_query(
+            query="SELECT name FROM sys.all_objects",
+            row_limit=3,
+        )
+
+        assert result.success is True
+        assert result.truncated is True
+        assert result.row_count == 3
+        assert len(result.rows) == 3
+
+    @sql_server_available
+    def test_cte_query(self):
+        """Test WITH (CTE) queries work."""
+        result = execute_select_query(
+            query="WITH cte AS (SELECT 1 AS val) SELECT val FROM cte"
+        )
+
+        assert result.success is True
+        assert result.row_count == 1
+        assert result.rows[0]["val"] == 1
+
+    def test_rejects_insert(self):
+        """Test that INSERT queries are rejected."""
+        result = execute_select_query(query="INSERT INTO foo VALUES (1)")
+
+        assert isinstance(result, ExecuteSelectQueryResponse)
+        assert result.success is False
+        assert "Only SELECT or WITH" in result.error
+
+    def test_rejects_multi_statement(self):
+        """Test that multi-statement queries with dangerous keywords are rejected."""
+        result = execute_select_query(query="SELECT 1; DROP TABLE foo")
+
+        assert result.success is False
+        assert "DROP" in result.error
+
+    def test_rejects_update(self):
+        """Test that UPDATE queries are rejected."""
+        result = execute_select_query(query="UPDATE foo SET bar = 1")
+
+        assert result.success is False
+        assert "Only SELECT or WITH" in result.error
+
+    @sql_server_available
+    def test_invalid_sql_returns_error(self):
+        """Test that invalid SQL returns a structured error."""
+        result = execute_select_query(query="SELECT FROM WHERE")
+
+        assert result.success is False
+        assert result.error is not None
+
+    def test_database_name_injection(self):
+        """Test that dangerous database names are rejected."""
+        result = execute_select_query(
+            query="SELECT 1",
+            database_name="master; DROP TABLE foo",
+        )
+
+        assert result.success is False
+        assert "Invalid database name" in result.error
+
+    def test_type_serialization(self):
+        """Test that _serialize_value handles various types."""
+        assert _serialize_value(None) is None
+        assert _serialize_value("hello") == "hello"
+        assert _serialize_value(42) == 42
+        assert _serialize_value(3.14) == 3.14
+        assert _serialize_value(True) is True
+        assert _serialize_value(Decimal("123.45")) == 123.45
+        assert _serialize_value(datetime(2024, 1, 15, 10, 30, 0)) == "2024-01-15T10:30:00"
+        assert _serialize_value(b"\xde\xad") == "dead"
+
+    def test_validate_select_query_allows_cte(self):
+        """Test that WITH (CTE) queries are allowed."""
+        assert _validate_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
+
+    def test_validate_select_query_strips_comments(self):
+        """Test that comments are stripped before validation."""
+        assert _validate_select_query("-- comment\nSELECT 1") is None
+        assert _validate_select_query("/* comment */ SELECT 1") is None

@@ -1,9 +1,16 @@
 """SQL Server Doctor MCP Server - Main server implementation."""
 
 import re
+import time
+import uuid
 import xml.etree.ElementTree as ET
+from datetime import date, datetime
+from datetime import time as time_type
+from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+import pyodbc
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
@@ -99,9 +106,7 @@ class SchedulerStatsResponse(BaseModel):
     total_runnable_tasks: int = Field(
         description="Total tasks waiting for CPU across all schedulers"
     )
-    avg_runnable_per_scheduler: float = Field(
-        description="Average runnable tasks per scheduler"
-    )
+    avg_runnable_per_scheduler: float = Field(description="Average runnable tasks per scheduler")
     cpu_pressure_detected: bool = Field(
         description="Whether CPU pressure is detected (runnable tasks > 0)"
     )
@@ -151,11 +156,15 @@ class MemoryStats(BaseModel):
     target_memory_mb: int = Field(description="Target server memory in MB")
     total_memory_mb: int = Field(description="Total server memory currently allocated in MB")
     memory_difference_mb: int = Field(description="Difference between target and total memory (MB)")
-    memory_pressure_status: str = Field(description="Memory pressure status: OK, WATCH, or UNDER_PRESSURE")
+    memory_pressure_status: str = Field(
+        description="Memory pressure status: OK, WATCH, or UNDER_PRESSURE"
+    )
     max_server_memory_mb: int = Field(description="Max server memory configuration setting (MB)")
     buffer_pool_committed_mb: int = Field(description="Buffer pool committed memory (MB)")
     buffer_pool_target_mb: int = Field(description="Buffer pool target memory (MB)")
-    overall_assessment: str = Field(description="Overall memory health assessment with recommendations")
+    overall_assessment: str = Field(
+        description="Overall memory health assessment with recommendations"
+    )
 
 
 class MemoryStatsResponse(BaseModel):
@@ -201,7 +210,9 @@ class HighCostOperator(BaseModel):
     estimated_rows: int = Field(description="Estimated row count")
     actual_rows: int = Field(description="Actual row count")
     cardinality_accurate: bool = Field(description="Whether cardinality estimation was accurate")
-    reason: str | None = Field(None, description="Reason for high cost (e.g., ORDER BY without index)")
+    reason: str | None = Field(
+        None, description="Reason for high cost (e.g., ORDER BY without index)"
+    )
 
 
 class ParallelismInfo(BaseModel):
@@ -218,7 +229,9 @@ class ExecutionPlanSummary(BaseModel):
     cached_plan_size_kb: int = Field(description="Size of cached plan in KB")
     compile_time_ms: int = Field(description="Compilation time in milliseconds")
     warnings: list[ExecutionPlanWarning] = Field(description="Warnings found in plan")
-    high_cost_operators: list[HighCostOperator] = Field(description="High-cost operators (> 20% cost)")
+    high_cost_operators: list[HighCostOperator] = Field(
+        description="High-cost operators (> 20% cost)"
+    )
     parallelism_info: ParallelismInfo = Field(description="Parallelism information")
 
 
@@ -240,9 +253,13 @@ class WaitStatistics(BaseModel):
 class AnalyzeQueryExecutionResponse(BaseModel):
     """Response model for analyze_query_execution tool."""
 
-    execution_metrics: ExecutionMetrics | None = Field(None, description="Execution performance metrics")
+    execution_metrics: ExecutionMetrics | None = Field(
+        None, description="Execution performance metrics"
+    )
     execution_plan_xml: str | None = Field(None, description="Full ShowPlanXML execution plan")
-    execution_plan_summary: ExecutionPlanSummary | None = Field(None, description="Summary of execution plan")
+    execution_plan_summary: ExecutionPlanSummary | None = Field(
+        None, description="Summary of execution plan"
+    )
     wait_statistics: WaitStatistics | None = Field(None, description="Wait statistics")
     bottleneck_type: str | None = Field(
         None, description="Primary bottleneck type (IO_BOUND, CPU_BOUND, WAIT_BOUND, MEMORY_BOUND)"
@@ -272,7 +289,9 @@ class DetectQueryAntipatternsResponse(BaseModel):
     antipatterns_found: list[AntipatternInfo] = Field(description="List of antipatterns detected")
     query_complexity_score: float = Field(description="Query complexity score (1-10 scale)")
     rewrite_priority: str = Field(description="Priority for rewriting (HIGH, MEDIUM, LOW, NONE)")
-    suggested_rewrite: str | None = Field(None, description="Complete rewritten query if applicable")
+    suggested_rewrite: str | None = Field(
+        None, description="Complete rewritten query if applicable"
+    )
     success: bool = Field(description="Whether the analysis was successful")
     error: str | None = Field(None, description="Error message if analysis failed")
 
@@ -309,8 +328,12 @@ class CardinalityMismatch(BaseModel):
 class GetQueryStatisticsHealthResponse(BaseModel):
     """Response model for get_query_statistics_health tool."""
 
-    statistics_analysis: list[StatisticsAnalysis] = Field(description="Statistics analysis for tables")
-    cardinality_mismatches: list[CardinalityMismatch] = Field(description="Cardinality mismatches found")
+    statistics_analysis: list[StatisticsAnalysis] = Field(
+        description="Statistics analysis for tables"
+    )
+    cardinality_mismatches: list[CardinalityMismatch] = Field(
+        description="Cardinality mismatches found"
+    )
     auto_update_stats_enabled: bool = Field(description="Whether auto-update statistics is enabled")
     auto_create_stats_enabled: bool = Field(description="Whether auto-create statistics is enabled")
     success: bool = Field(description="Whether the analysis was successful")
@@ -364,7 +387,9 @@ class AnalyzeMissingIndexesResponse(BaseModel):
     """Response model for analyze_missing_indexes tool."""
 
     missing_indexes: list[MissingIndexInfo] = Field(description="Missing index recommendations")
-    existing_index_usage: list[ExistingIndexUsage] = Field(description="Existing index usage information")
+    existing_index_usage: list[ExistingIndexUsage] = Field(
+        description="Existing index usage information"
+    )
     index_overlaps: list[IndexOverlap] = Field(description="Overlapping index information")
     success: bool = Field(description="Whether the analysis was successful")
     error: str | None = Field(None, description="Error message if analysis failed")
@@ -380,6 +405,99 @@ class FindObjectDatabaseResponse(BaseModel):
     full_name: str | None = Field(description="Fully qualified name (database.schema.object)")
     success: bool = Field(description="Whether the search was successful")
     error: str | None = Field(None, description="Error message if search failed")
+
+
+class ColumnMetadata(BaseModel):
+    """Metadata for a single column in a query result set."""
+
+    name: str = Field(description="Column name")
+    type_name: str = Field(
+        description="Python type name of the column value (e.g., str, int, datetime, Decimal)"
+    )
+
+
+class ExecuteSelectQueryResponse(BaseModel):
+    """Response model for execute_select_query tool."""
+
+    columns: list[ColumnMetadata] = Field(
+        default_factory=list, description="Column metadata for the result set"
+    )
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list, description="Result rows as list of dicts"
+    )
+    row_count: int = Field(0, description="Number of rows returned")
+    truncated: bool = Field(False, description="Whether results were truncated by row_limit")
+    execution_time_ms: int = Field(0, description="Query execution time in milliseconds")
+    success: bool = Field(description="Whether the query was successful")
+    error: str | None = Field(None, description="Error message if query failed")
+
+
+# Helper functions for execute_select_query
+def _validate_select_query(query: str) -> str | None:
+    """Validate that a query is a safe SELECT statement.
+
+    Returns error message if query is not safe, None if OK.
+    """
+    stripped = query.strip()
+    # Remove single-line comments
+    cleaned = re.sub(r"--[^\n]*", " ", stripped)
+    # Remove multi-line comments
+    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
+    cleaned = cleaned.strip().upper()
+
+    if not cleaned.startswith("SELECT") and not cleaned.startswith("WITH"):
+        return "Only SELECT or WITH (CTE) queries are allowed"
+
+    # Check for dangerous keywords after semicolons
+    dangerous = {
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "ALTER",
+        "CREATE",
+        "TRUNCATE",
+        "EXEC",
+        "EXECUTE",
+        "GRANT",
+        "REVOKE",
+        "DENY",
+        "BACKUP",
+        "RESTORE",
+        "SHUTDOWN",
+        "DBCC",
+        "BULK",
+    }
+    statements = cleaned.split(";")
+    for stmt in statements[1:]:
+        stmt_stripped = stmt.strip()
+        if stmt_stripped:
+            first_word = stmt_stripped.split()[0] if stmt_stripped.split() else ""
+            if first_word in dangerous:
+                return f"Multi-statement queries containing {first_word} are not allowed"
+
+    return None
+
+
+def _serialize_value(value: Any) -> Any:
+    """Convert a pyodbc cell value to a JSON-serializable type."""
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time_type):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return str(value)
 
 
 # Tools
@@ -541,7 +659,7 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
     """
     Get SQL Server scheduler statistics for CPU and Disk IO queue monitoring. Used for preassure detection.
 
-    Returns average scheduler information including runnable tasks (CPU queue depth) and pending I/O operations. 
+    Returns average scheduler information including runnable tasks (CPU queue depth) and pending I/O operations.
     This is critical for identifying CPU pressure and performance bottlenecks.
 
     Key metrics interpretation:
@@ -588,19 +706,31 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
         elif avg_runnable <= 2:
             interpretation_parts.append(f"MILD CPU PRESSURE (avg runnable: {avg_runnable:.2f})")
         elif avg_runnable <= 5:
-            interpretation_parts.append(f"MODERATE CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Consider query optimization")
+            interpretation_parts.append(
+                f"MODERATE CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Consider query optimization"
+            )
         else:
-            interpretation_parts.append(f"CRITICAL CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Immediate action needed!")
+            interpretation_parts.append(
+                f"CRITICAL CPU PRESSURE (avg runnable: {avg_runnable:.2f}) - Immediate action needed!"
+            )
 
         # I/O pressure interpretation
         if avg_pending_io <= 1:
-            interpretation_parts.append(f"Normal I/O activity (avg pending I/O: {avg_pending_io:.2f})")
+            interpretation_parts.append(
+                f"Normal I/O activity (avg pending I/O: {avg_pending_io:.2f})"
+            )
         elif avg_pending_io <= 5:
-            interpretation_parts.append(f"MODERATE I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f})")
+            interpretation_parts.append(
+                f"MODERATE I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f})"
+            )
         elif avg_pending_io <= 10:
-            interpretation_parts.append(f"HIGH I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f}) - Check disk performance")
+            interpretation_parts.append(
+                f"HIGH I/O PRESSURE (avg pending I/O: {avg_pending_io:.2f}) - Check disk performance"
+            )
         else:
-            interpretation_parts.append(f"CRITICAL I/O BOTTLENECK (avg pending I/O: {avg_pending_io:.2f}) - Check disk subsystem immediately!")
+            interpretation_parts.append(
+                f"CRITICAL I/O BOTTLENECK (avg pending I/O: {avg_pending_io:.2f}) - Check disk subsystem immediately!"
+            )
 
         interpretation = " | ".join(interpretation_parts)
 
@@ -936,22 +1066,22 @@ def _parse_runtime_stats_from_plan(plan_xml: str) -> dict | None:
     """
     try:
         root = ET.fromstring(plan_xml)
-        ns = {'p': 'http://schemas.microsoft.com/sqlserver/2004/07/showplan'}
+        ns = {"p": "http://schemas.microsoft.com/sqlserver/2004/07/showplan"}
 
         # Find RunTimeCountersPerThread element
         # This contains actual execution statistics
-        runtime = root.find('.//p:RunTimeCountersPerThread', ns)
+        runtime = root.find(".//p:RunTimeCountersPerThread", ns)
 
         if runtime is not None:
             return {
-                'actual_rows': int(runtime.get('ActualRows', 0)),
-                'actual_elapsed_ms': int(runtime.get('ActualElapsedms', 0)),
-                'actual_cpu_ms': int(runtime.get('ActualCPUms', 0)),
-                'actual_logical_reads': int(runtime.get('ActualLogicalReads', 0)),
-                'actual_physical_reads': int(runtime.get('ActualPhysicalReads', 0)),
-                'actual_read_aheads': int(runtime.get('ActualReadAheads', 0)),
-                'actual_lob_logical_reads': int(runtime.get('ActualLobLogicalReads', 0)),
-                'actual_lob_physical_reads': int(runtime.get('ActualLobPhysicalReads', 0))
+                "actual_rows": int(runtime.get("ActualRows", 0)),
+                "actual_elapsed_ms": int(runtime.get("ActualElapsedms", 0)),
+                "actual_cpu_ms": int(runtime.get("ActualCPUms", 0)),
+                "actual_logical_reads": int(runtime.get("ActualLogicalReads", 0)),
+                "actual_physical_reads": int(runtime.get("ActualPhysicalReads", 0)),
+                "actual_read_aheads": int(runtime.get("ActualReadAheads", 0)),
+                "actual_lob_logical_reads": int(runtime.get("ActualLobLogicalReads", 0)),
+                "actual_lob_physical_reads": int(runtime.get("ActualLobPhysicalReads", 0)),
             }
         else:
             logger.warning("No RunTimeCountersPerThread found in execution plan XML")
@@ -970,7 +1100,7 @@ def analyze_query_execution(
     query: str,
     database_name: str | None = None,
     include_actual_plan: bool = True,
-    max_execution_time_seconds: int = 30
+    max_execution_time_seconds: int = 30,
 ) -> AnalyzeQueryExecutionResponse:
     """
     Capture baseline performance metrics and execution plan analysis.
@@ -1006,7 +1136,7 @@ def analyze_query_execution(
                 query_hash=None,
                 query_plan_hash=None,
                 success=False,
-                error="Only SELECT queries are allowed for analysis"
+                error="Only SELECT queries are allowed for analysis",
             )
 
         conn = get_connection()
@@ -1032,8 +1162,6 @@ def analyze_query_execution(
         combined_query = "\n".join(query_parts)
 
         # Execute the query with timeout
-        import time
-        import pyodbc
         start_time = time.time()
 
         try:
@@ -1057,11 +1185,17 @@ def analyze_query_execution(
                             current_results.append(dict(zip(columns, row)))
 
                         # Determine what this result set is
-                        if include_actual_plan and len(columns) == 1 and 'showplan' in columns[0].lower():
+                        if (
+                            include_actual_plan
+                            and len(columns) == 1
+                            and "showplan" in columns[0].lower()
+                        ):
                             # This is the execution plan XML
                             if current_results and len(current_results) > 0:
                                 execution_plan_xml = current_results[0][columns[0]]
-                                logger.debug(f"Captured execution plan XML ({len(execution_plan_xml)} chars)")
+                                logger.debug(
+                                    f"Captured execution plan XML ({len(execution_plan_xml)} chars)"
+                                )
                         elif current_results:
                             # This is the query results
                             results = current_results
@@ -1085,7 +1219,7 @@ def analyze_query_execution(
                 query_hash=None,
                 query_plan_hash=None,
                 success=False,
-                error=f"Query execution failed: {str(e)}"
+                error=f"Query execution failed: {str(e)}",
             )
 
         # Get query hash and plan hash from sys.dm_exec_query_stats
@@ -1112,22 +1246,28 @@ def analyze_query_execution(
         if execution_plan_xml:
             runtime_stats = _parse_runtime_stats_from_plan(execution_plan_xml)
             if runtime_stats:
-                logger.info(f"Extracted runtime stats from execution plan: "
-                          f"{runtime_stats['actual_logical_reads']} logical reads, "
-                          f"{runtime_stats['actual_cpu_ms']}ms CPU")
+                logger.info(
+                    f"Extracted runtime stats from execution plan: "
+                    f"{runtime_stats['actual_logical_reads']} logical reads, "
+                    f"{runtime_stats['actual_cpu_ms']}ms CPU"
+                )
 
         # Create execution metrics from runtime stats or fallback to basic timing
         if runtime_stats:
             execution_metrics = ExecutionMetrics(
-                duration_ms=runtime_stats['actual_elapsed_ms'] if runtime_stats['actual_elapsed_ms'] > 0 else execution_time_ms,
-                cpu_time_ms=runtime_stats['actual_cpu_ms'],
-                logical_reads=runtime_stats['actual_logical_reads'],
-                physical_reads=runtime_stats['actual_physical_reads'],
-                read_ahead_reads=runtime_stats['actual_read_aheads'],
-                lob_logical_reads=runtime_stats['actual_lob_logical_reads'],
-                lob_physical_reads=runtime_stats['actual_lob_physical_reads'],
-                row_count=runtime_stats['actual_rows'],
-                estimated_cost=0.0  # Would need to parse from plan operators
+                duration_ms=(
+                    runtime_stats["actual_elapsed_ms"]
+                    if runtime_stats["actual_elapsed_ms"] > 0
+                    else execution_time_ms
+                ),
+                cpu_time_ms=runtime_stats["actual_cpu_ms"],
+                logical_reads=runtime_stats["actual_logical_reads"],
+                physical_reads=runtime_stats["actual_physical_reads"],
+                read_ahead_reads=runtime_stats["actual_read_aheads"],
+                lob_logical_reads=runtime_stats["actual_lob_logical_reads"],
+                lob_physical_reads=runtime_stats["actual_lob_physical_reads"],
+                row_count=runtime_stats["actual_rows"],
+                estimated_cost=0.0,  # Would need to parse from plan operators
             )
         else:
             # Fallback to basic metrics if plan XML not available or parsing failed
@@ -1140,9 +1280,11 @@ def analyze_query_execution(
                 lob_logical_reads=0,
                 lob_physical_reads=0,
                 row_count=len(results) if results else 0,
-                estimated_cost=0.0
+                estimated_cost=0.0,
             )
-            logger.warning("Using basic timing metrics - runtime stats not available from execution plan")
+            logger.warning(
+                "Using basic timing metrics - runtime stats not available from execution plan"
+            )
 
         # Execution plan summary not yet implemented
         # TODO: Parse warnings, high-cost operators, parallelism info from plan XML
@@ -1153,7 +1295,11 @@ def analyze_query_execution(
         if execution_metrics.logical_reads > 0:
             # Calculate I/O time vs CPU time
             io_time_estimate = execution_metrics.duration_ms - execution_metrics.cpu_time_ms
-            cpu_percentage = (execution_metrics.cpu_time_ms / execution_metrics.duration_ms * 100) if execution_metrics.duration_ms > 0 else 0
+            cpu_percentage = (
+                (execution_metrics.cpu_time_ms / execution_metrics.duration_ms * 100)
+                if execution_metrics.duration_ms > 0
+                else 0
+            )
 
             if cpu_percentage > 70:
                 bottleneck_type = "CPU_BOUND"
@@ -1169,7 +1315,9 @@ def analyze_query_execution(
         # Wait statistics not captured - would need sys.dm_os_wait_stats correlation
         wait_statistics = None
 
-        logger.info(f"Query executed in {execution_time_ms}ms, returned {len(results) if results else 0} rows")
+        logger.info(
+            f"Query executed in {execution_time_ms}ms, returned {len(results) if results else 0} rows"
+        )
 
         return AnalyzeQueryExecutionResponse(
             execution_metrics=execution_metrics,
@@ -1179,7 +1327,7 @@ def analyze_query_execution(
             bottleneck_type=bottleneck_type,
             query_hash=query_hash,
             query_plan_hash=query_plan_hash,
-            success=True
+            success=True,
         )
 
     except Exception as e:
@@ -1193,15 +1341,13 @@ def analyze_query_execution(
             query_hash=None,
             query_plan_hash=None,
             success=False,
-            error=str(e)
+            error=str(e),
         )
 
 
 @mcp.tool()
 def get_query_statistics_health(
-    database_name: str,
-    table_names: list[str] | None = None,
-    execution_plan_xml: str | None = None
+    database_name: str, table_names: list[str] | None = None, execution_plan_xml: str | None = None
 ) -> GetQueryStatisticsHealthResponse:
     """
     Check statistics freshness and quality for tables in a query.
@@ -1237,19 +1383,29 @@ def get_query_statistics_health(
                 auto_update_stats_enabled=False,
                 auto_create_stats_enabled=False,
                 success=False,
-                error="Either table_names or execution_plan_xml must be provided"
+                error="Either table_names or execution_plan_xml must be provided",
             )
 
         # Get database configuration
         try:
-            db_config = conn.execute_query(f"""
+            db_config = conn.execute_query(
+                f"""
                 SELECT
                     CONVERT(BIT, DATABASEPROPERTYEX('{database_name}', 'IsAutoUpdateStatistics')) AS auto_update_enabled,
                     CONVERT(BIT, DATABASEPROPERTYEX('{database_name}', 'IsAutoCreateStatistics')) AS auto_create_enabled
-            """)
+            """
+            )
 
-            auto_update_enabled = bool(db_config[0]["auto_update_enabled"]) if (db_config and len(db_config) > 0) else False
-            auto_create_enabled = bool(db_config[0]["auto_create_enabled"]) if (db_config and len(db_config) > 0) else False
+            auto_update_enabled = (
+                bool(db_config[0]["auto_update_enabled"])
+                if (db_config and len(db_config) > 0)
+                else False
+            )
+            auto_create_enabled = (
+                bool(db_config[0]["auto_create_enabled"])
+                if (db_config and len(db_config) > 0)
+                else False
+            )
         except Exception as e:
             logger.warning(f"Could not retrieve database configuration: {str(e)}")
             auto_update_enabled = False
@@ -1292,12 +1448,16 @@ def get_query_statistics_health(
 
                 # Check if results is None or empty
                 if not results:
-                    logger.warning(f"No statistics found for table {table_name} - table may not exist or has no statistics")
+                    logger.warning(
+                        f"No statistics found for table {table_name} - table may not exist or has no statistics"
+                    )
                     continue
 
                 for row in results:
                     days_old = row["days_old"] if row["days_old"] is not None else 999
-                    mod_percent = float(row["modification_percent"]) if row["modification_percent"] else 0.0
+                    mod_percent = (
+                        float(row["modification_percent"]) if row["modification_percent"] else 0.0
+                    )
 
                     # Determine if update needed
                     needs_update = False
@@ -1313,21 +1473,25 @@ def get_query_statistics_health(
                             severity = "WARNING"
                             recommendation = f"UPDATE STATISTICS {table_name};"
 
-                    statistics_analysis.append(StatisticsAnalysis(
-                        table=table_name,
-                        index=row["index_name"],
-                        statistics_name=row["statistics_name"],
-                        last_updated=row["last_updated"],
-                        days_old=days_old,
-                        rows_in_table=row["rows_in_table"],
-                        rows_sampled=row["rows_sampled"],
-                        sampling_percent=float(row["sampling_percent"]) if row["sampling_percent"] else 0.0,
-                        modification_counter=row["modification_counter"],
-                        modification_percent=mod_percent,
-                        needs_update=needs_update,
-                        severity=severity,
-                        recommendation=recommendation
-                    ))
+                    statistics_analysis.append(
+                        StatisticsAnalysis(
+                            table=table_name,
+                            index=row["index_name"],
+                            statistics_name=row["statistics_name"],
+                            last_updated=row["last_updated"],
+                            days_old=days_old,
+                            rows_in_table=row["rows_in_table"],
+                            rows_sampled=row["rows_sampled"],
+                            sampling_percent=(
+                                float(row["sampling_percent"]) if row["sampling_percent"] else 0.0
+                            ),
+                            modification_counter=row["modification_counter"],
+                            modification_percent=mod_percent,
+                            needs_update=needs_update,
+                            severity=severity,
+                            recommendation=recommendation,
+                        )
+                    )
 
             except Exception as e:
                 logger.warning(f"Could not get statistics for table {table_name}: {str(e)}")
@@ -1337,14 +1501,16 @@ def get_query_statistics_health(
         # estimated vs actual rows from execution plan XML
         cardinality_mismatches = []
 
-        logger.info(f"Analyzed statistics for {len(statistics_analysis)} statistic(s) across {len(table_names)} table(s)")
+        logger.info(
+            f"Analyzed statistics for {len(statistics_analysis)} statistic(s) across {len(table_names)} table(s)"
+        )
 
         return GetQueryStatisticsHealthResponse(
             statistics_analysis=statistics_analysis,
             cardinality_mismatches=cardinality_mismatches,
             auto_update_stats_enabled=auto_update_enabled,
             auto_create_stats_enabled=auto_create_enabled,
-            success=True
+            success=True,
         )
 
     except Exception as e:
@@ -1355,14 +1521,13 @@ def get_query_statistics_health(
             auto_update_stats_enabled=False,
             auto_create_stats_enabled=False,
             success=False,
-            error=str(e)
+            error=str(e),
         )
 
 
 @mcp.tool()
 def analyze_missing_indexes(
-    database_name: str,
-    execution_plan_xml: str | None = None
+    database_name: str, execution_plan_xml: str | None = None
 ) -> AnalyzeMissingIndexesResponse:
     """
     Analyze missing index recommendations and existing index usage for a database.
@@ -1410,9 +1575,16 @@ def analyze_missing_indexes(
         missing_indexes = []
 
         for row in missing_index_results:
-            table_name = row["table_name"].replace(f"[{database_name}].", "").replace("[", "").replace("]", "")
+            table_name = (
+                row["table_name"]
+                .replace(f"[{database_name}].", "")
+                .replace("[", "")
+                .replace("]", "")
+            )
             equality_cols = row["equality_columns"].split(", ") if row["equality_columns"] else []
-            inequality_cols = row["inequality_columns"].split(", ") if row["inequality_columns"] else []
+            inequality_cols = (
+                row["inequality_columns"].split(", ") if row["inequality_columns"] else []
+            )
             included_cols = row["included_columns"].split(", ") if row["included_columns"] else []
 
             impact_score = float(row["impact_score"])
@@ -1428,7 +1600,9 @@ def analyze_missing_indexes(
             # Build CREATE INDEX statement
             index_name = f"IX_{table_name.split('.')[-1]}_{'_'.join([c.replace('[', '').replace(']', '') for c in equality_cols[:3]])}"
             key_columns = ", ".join(equality_cols + inequality_cols)
-            create_statement = f"CREATE NONCLUSTERED INDEX {index_name} ON {table_name} ({key_columns})"
+            create_statement = (
+                f"CREATE NONCLUSTERED INDEX {index_name} ON {table_name} ({key_columns})"
+            )
             if included_cols:
                 create_statement += f" INCLUDE ({', '.join(included_cols)})"
 
@@ -1441,22 +1615,24 @@ def analyze_missing_indexes(
             if len(equality_cols) + len(inequality_cols) > 5:
                 considerations.append("Wide index key - may have high maintenance overhead")
 
-            missing_indexes.append(MissingIndexInfo(
-                table=table_name,
-                equality_columns=equality_cols,
-                inequality_columns=inequality_cols,
-                included_columns=included_cols,
-                impact_score=impact_score,
-                avg_user_impact=float(row["avg_user_impact"]),
-                avg_total_user_cost=float(row["avg_total_user_cost"]),
-                user_seeks=row["user_seeks"],
-                user_scans=row["user_scans"],
-                last_user_seek=row["last_user_seek"],
-                create_statement=create_statement,
-                estimated_size_mb=estimated_size_mb,
-                recommendation_priority=priority,
-                considerations=considerations
-            ))
+            missing_indexes.append(
+                MissingIndexInfo(
+                    table=table_name,
+                    equality_columns=equality_cols,
+                    inequality_columns=inequality_cols,
+                    included_columns=included_cols,
+                    impact_score=impact_score,
+                    avg_user_impact=float(row["avg_user_impact"]),
+                    avg_total_user_cost=float(row["avg_total_user_cost"]),
+                    user_seeks=row["user_seeks"],
+                    user_scans=row["user_scans"],
+                    last_user_seek=row["last_user_seek"],
+                    create_statement=create_statement,
+                    estimated_size_mb=estimated_size_mb,
+                    recommendation_priority=priority,
+                    considerations=considerations,
+                )
+            )
 
         # Parse execution plan XML for query-specific missing index recommendations
         if execution_plan_xml:
@@ -1465,21 +1641,21 @@ def analyze_missing_indexes(
                 root = ET.fromstring(execution_plan_xml)
 
                 # Define XML namespaces
-                ns = {'p': 'http://schemas.microsoft.com/sqlserver/2004/07/showplan'}
+                ns = {"p": "http://schemas.microsoft.com/sqlserver/2004/07/showplan"}
 
                 # Find all MissingIndexGroup elements
-                for missing_group in root.findall('.//p:MissingIndexGroup', ns):
-                    impact = float(missing_group.get('Impact', 0))
+                for missing_group in root.findall(".//p:MissingIndexGroup", ns):
+                    impact = float(missing_group.get("Impact", 0))
 
                     # Find the MissingIndex element
-                    missing_index = missing_group.find('.//p:MissingIndex', ns)
+                    missing_index = missing_group.find(".//p:MissingIndex", ns)
                     if missing_index is None:
                         continue
 
                     # Extract table information
-                    database = missing_index.get('Database', '').strip('[]')
-                    schema = missing_index.get('Schema', 'dbo').strip('[]')
-                    table = missing_index.get('Table', '').strip('[]')
+                    database = missing_index.get("Database", "").strip("[]")
+                    schema = missing_index.get("Schema", "dbo").strip("[]")
+                    table = missing_index.get("Table", "").strip("[]")
                     table_name = f"{schema}.{table}" if schema and table else ""
 
                     if not table_name:
@@ -1490,22 +1666,30 @@ def analyze_missing_indexes(
                     inequality_cols = []
                     included_cols = []
 
-                    for col_group in missing_index.findall('.//p:ColumnGroup', ns):
-                        usage = col_group.get('Usage', '')
-                        columns = [col.get('Name', '').strip('[]')
-                                  for col in col_group.findall('.//p:Column', ns)]
+                    for col_group in missing_index.findall(".//p:ColumnGroup", ns):
+                        usage = col_group.get("Usage", "")
+                        columns = [
+                            col.get("Name", "").strip("[]")
+                            for col in col_group.findall(".//p:Column", ns)
+                        ]
 
-                        if usage == 'EQUALITY':
+                        if usage == "EQUALITY":
                             equality_cols.extend(columns)
-                        elif usage == 'INEQUALITY':
+                        elif usage == "INEQUALITY":
                             inequality_cols.extend(columns)
-                        elif usage == 'INCLUDE':
+                        elif usage == "INCLUDE":
                             included_cols.extend(columns)
 
                     # Build CREATE INDEX statement
-                    index_name = f"IX_{table}_{'_'.join(equality_cols[:2])}" if equality_cols else f"IX_{table}_Suggested"
-                    key_columns = ', '.join(equality_cols + inequality_cols)
-                    include_clause = f" INCLUDE ({', '.join(included_cols)})" if included_cols else ""
+                    index_name = (
+                        f"IX_{table}_{'_'.join(equality_cols[:2])}"
+                        if equality_cols
+                        else f"IX_{table}_Suggested"
+                    )
+                    key_columns = ", ".join(equality_cols + inequality_cols)
+                    include_clause = (
+                        f" INCLUDE ({', '.join(included_cols)})" if included_cols else ""
+                    )
                     create_statement = f"CREATE INDEX {index_name} ON {table_name} ({key_columns}){include_clause};"
 
                     # Determine priority based on impact
@@ -1520,28 +1704,34 @@ def analyze_missing_indexes(
 
                     considerations = [
                         f"From execution plan analysis (impact: {impact:.1f}%)",
-                        "Query-specific recommendation - validate against overall workload"
+                        "Query-specific recommendation - validate against overall workload",
                     ]
 
                     # Add to missing indexes list
-                    missing_indexes.append(MissingIndexInfo(
-                        table=table_name,
-                        equality_columns=', '.join(equality_cols) if equality_cols else None,
-                        inequality_columns=', '.join(inequality_cols) if inequality_cols else None,
-                        included_columns=', '.join(included_cols) if included_cols else None,
-                        impact_score=impact * 1000,  # Scale to match DMV impact scores
-                        avg_user_impact=impact,
-                        avg_total_user_cost=0.0,  # Not available from plan
-                        user_seeks=0,  # Not available from plan
-                        user_scans=0,  # Not available from plan
-                        last_user_seek=None,
-                        create_statement=create_statement,
-                        estimated_size_mb=0.0,  # Cannot estimate from plan
-                        recommendation_priority=priority,
-                        considerations=considerations
-                    ))
+                    missing_indexes.append(
+                        MissingIndexInfo(
+                            table=table_name,
+                            equality_columns=", ".join(equality_cols) if equality_cols else None,
+                            inequality_columns=(
+                                ", ".join(inequality_cols) if inequality_cols else None
+                            ),
+                            included_columns=", ".join(included_cols) if included_cols else None,
+                            impact_score=impact * 1000,  # Scale to match DMV impact scores
+                            avg_user_impact=impact,
+                            avg_total_user_cost=0.0,  # Not available from plan
+                            user_seeks=0,  # Not available from plan
+                            user_scans=0,  # Not available from plan
+                            last_user_seek=None,
+                            create_statement=create_statement,
+                            estimated_size_mb=0.0,  # Cannot estimate from plan
+                            recommendation_priority=priority,
+                            considerations=considerations,
+                        )
+                    )
 
-                logger.info(f"Extracted {len([m for m in missing_indexes if 'execution plan' in str(m.considerations)])} missing index recommendations from execution plan")
+                logger.info(
+                    f"Extracted {len([m for m in missing_indexes if 'execution plan' in str(m.considerations)])} missing index recommendations from execution plan"
+                )
 
             except ET.ParseError as e:
                 logger.warning(f"Could not parse execution plan XML: {str(e)}")
@@ -1591,18 +1781,20 @@ def analyze_missing_indexes(
             elif total_reads < 10 and updates > 1000:
                 recommendation = "Very low read benefit vs update cost - review for removal"
 
-            existing_index_usage.append(ExistingIndexUsage(
-                table=row["table_name"],
-                index_name=row["index_name"],
-                user_seeks=row["user_seeks"],
-                user_scans=row["user_scans"],
-                user_lookups=row["user_lookups"],
-                user_updates=row["user_updates"],
-                last_user_seek=row["last_user_seek"],
-                size_mb=float(row["size_mb"]),
-                recommendation=recommendation,
-                action=action
-            ))
+            existing_index_usage.append(
+                ExistingIndexUsage(
+                    table=row["table_name"],
+                    index_name=row["index_name"],
+                    user_seeks=row["user_seeks"],
+                    user_scans=row["user_scans"],
+                    user_lookups=row["user_lookups"],
+                    user_updates=row["user_updates"],
+                    last_user_seek=row["last_user_seek"],
+                    size_mb=float(row["size_mb"]),
+                    recommendation=recommendation,
+                    action=action,
+                )
+            )
 
         # Index overlap detection (simplified - just look for naming patterns)
         index_overlaps = []
@@ -1616,7 +1808,7 @@ def analyze_missing_indexes(
             missing_indexes=missing_indexes,
             existing_index_usage=existing_index_usage,
             index_overlaps=index_overlaps,
-            success=True
+            success=True,
         )
 
     except Exception as e:
@@ -1626,12 +1818,14 @@ def analyze_missing_indexes(
             existing_index_usage=[],
             index_overlaps=[],
             success=False,
-            error=str(e)
+            error=str(e),
         )
 
 
 @mcp.tool()
-def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None) -> DetectQueryAntipatternsResponse:
+def detect_query_antipatterns(
+    query: str, execution_plan_xml: str | None = None
+) -> DetectQueryAntipatternsResponse:
     """
     Detect common SQL query antipatterns and recommend rewrites.
 
@@ -1662,15 +1856,15 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
         query_upper = query.upper()
 
         # Pattern 1: SELECT *
-        if re.search(r'\bSELECT\s+\*\s+FROM\b', query_upper):
+        if re.search(r"\bSELECT\s+\*\s+FROM\b", query_upper):
             antipatterns.append(
                 AntipatternInfo(
                     category="SELECT_STAR",
                     severity="MEDIUM",
-                    location=re.search(r'SELECT\s+\*\s+FROM', query_upper, re.IGNORECASE).group(),
+                    location=re.search(r"SELECT\s+\*\s+FROM", query_upper, re.IGNORECASE).group(),
                     issue="Selecting all columns instead of specific ones",
                     recommendation="Specify only the columns you need: SELECT col1, col2, col3 FROM ...",
-                    estimated_impact="Could reduce logical reads by 30-60% depending on table width"
+                    estimated_impact="Could reduce logical reads by 30-60% depending on table width",
                 )
             )
             complexity_score += 0.5
@@ -1678,7 +1872,7 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
         # Pattern 2: Non-SARGable predicates - Functions on columns in WHERE/AND/ON clauses
         # Matches patterns like: Schema.Function(Table.Column) or Function(Column)
         # Examples: YEAR(OrderDate), RPT.JulianToDate(F595074H.PHUPMJ), CAST(col AS INT), dbo.GetTotal(Orders.Amount)
-        generic_function_pattern = r'(?:WHERE|AND|ON)\s+(?:[\w]+\.)?[\w]+\s*\([^)]*?(\w+\.\w+)[^)]*?\)\s*(?:=|<|>|<=|>=|<>|!=|BETWEEN|IN|LIKE|NOT\s+IN|NOT\s+LIKE)'
+        generic_function_pattern = r"(?:WHERE|AND|ON)\s+(?:[\w]+\.)?[\w]+\s*\([^)]*?(\w+\.\w+)[^)]*?\)\s*(?:=|<|>|<=|>=|<>|!=|BETWEEN|IN|LIKE|NOT\s+IN|NOT\s+LIKE)"
 
         for match in re.finditer(generic_function_pattern, query_upper, re.IGNORECASE):
             function_call = match.group(0).strip()
@@ -1696,7 +1890,7 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                         f"2) Store data in proper format to avoid conversion function. "
                         f"3) If possible, reverse the function to the literal side of the comparison."
                     ),
-                    estimated_impact="Could eliminate table/index scan and use index seek instead"
+                    estimated_impact="Could eliminate table/index scan and use index seek instead",
                 )
             )
             complexity_score += 1.5
@@ -1712,13 +1906,13 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                         location=match.group(),
                         issue="Leading wildcard in LIKE prevents index seek",
                         recommendation="Remove leading wildcard if possible, or consider full-text search",
-                        estimated_impact="Forces table/index scan instead of seek"
+                        estimated_impact="Forces table/index scan instead of seek",
                     )
                 )
                 complexity_score += 1.0
 
         # Pattern 4: Correlated subqueries
-        subquery_pattern = r'\(\s*SELECT\s+[^\)]*\b(?:FROM|WHERE)[^\)]*\b(?:WHERE|JOIN)[^\)]*\b(?:\w+\.\w+\s*=\s*\w+\.\w+|\w+\s*=\s*\w+\.\w+)[^\)]*\)'
+        subquery_pattern = r"\(\s*SELECT\s+[^\)]*\b(?:FROM|WHERE)[^\)]*\b(?:WHERE|JOIN)[^\)]*\b(?:\w+\.\w+\s*=\s*\w+\.\w+|\w+\s*=\s*\w+\.\w+)[^\)]*\)"
         if re.search(subquery_pattern, query, re.IGNORECASE | re.DOTALL):
             antipatterns.append(
                 AntipatternInfo(
@@ -1727,13 +1921,13 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                     location="(SELECT ... FROM ... WHERE outer.col = inner.col)",
                     issue="Correlated subquery may execute once per outer row",
                     recommendation="Rewrite as JOIN or use APPLY operator",
-                    estimated_impact="Could eliminate thousands of subquery executions"
+                    estimated_impact="Could eliminate thousands of subquery executions",
                 )
             )
             complexity_score += 2.0
 
         # Pattern 5: COUNT(*) or COUNT(column) in WHERE
-        if re.search(r'\bWHERE\s+[^\(]*\bCOUNT\s*\(', query_upper):
+        if re.search(r"\bWHERE\s+[^\(]*\bCOUNT\s*\(", query_upper):
             antipatterns.append(
                 AntipatternInfo(
                     category="SCALAR_UDF",
@@ -1741,7 +1935,7 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                     location="WHERE ... COUNT(...)",
                     issue="Aggregate function in WHERE clause (should be in HAVING)",
                     recommendation="Move aggregate to HAVING clause or use subquery",
-                    estimated_impact="May cause query compilation failure or inefficient execution"
+                    estimated_impact="May cause query compilation failure or inefficient execution",
                 )
             )
             complexity_score += 1.0
@@ -1752,9 +1946,13 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                 root = ET.fromstring(execution_plan_xml)
 
                 # Look for warnings in execution plan
-                for warning in root.findall(".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}Warnings"):
+                for warning in root.findall(
+                    ".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}Warnings"
+                ):
                     # Implicit conversion warnings
-                    for conversion in warning.findall(".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}ColumnsWithNoStatistics"):
+                    for conversion in warning.findall(
+                        ".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}ColumnsWithNoStatistics"
+                    ):
                         antipatterns.append(
                             AntipatternInfo(
                                 category="MISSING_STATISTICS",
@@ -1762,13 +1960,15 @@ def detect_query_antipatterns(query: str, execution_plan_xml: str | None = None)
                                 location="Execution Plan Warning",
                                 issue="Columns without statistics found in execution plan",
                                 recommendation="Update statistics or create statistics on referenced columns",
-                                estimated_impact="Poor cardinality estimates leading to suboptimal plans"
+                                estimated_impact="Poor cardinality estimates leading to suboptimal plans",
                             )
                         )
                         complexity_score += 1.5
 
                 # Check for table scans on large tables
-                for relop in root.findall(".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}RelOp"):
+                for relop in root.findall(
+                    ".//{http://schemas.microsoft.com/sqlserver/2004/07/showplan}RelOp"
+                ):
                     if "Scan" in relop.get("LogicalOp", ""):
                         estimated_rows = relop.get("EstimateRows", 0)
                         if float(estimated_rows) > 10000:
@@ -1832,7 +2032,7 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
         conn = get_connection()
 
         # Parse object name into parts
-        parts = [p.strip().strip('[]') for p in object_name.split('.')]
+        parts = [p.strip().strip("[]") for p in object_name.split(".")]
 
         if len(parts) == 3:
             # Database.Schema.Object format - just validate
@@ -1849,7 +2049,7 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
         else:
             # Just Object name - assume dbo schema
             target_db = None
-            target_schema = 'dbo'
+            target_schema = "dbo"
             target_object = parts[0]
             databases_to_search = None  # Search all
 
@@ -1863,7 +2063,7 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
                 ORDER BY name
             """
             db_results = conn.execute_query(db_query)
-            databases_to_search = [row['name'] for row in db_results]
+            databases_to_search = [row["name"] for row in db_results]
 
         if not databases_to_search:
             return FindObjectDatabaseResponse(
@@ -1873,14 +2073,15 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
                 object_type=None,
                 full_name=None,
                 success=False,
-                error="No accessible databases found"
+                error="No accessible databases found",
             )
 
         # Build UNION query across all databases
         # Note: Use COLLATE DATABASE_DEFAULT to avoid collation conflicts between databases
         union_parts = []
         for db_name in databases_to_search:
-            union_parts.append(f"""
+            union_parts.append(
+                f"""
                 SELECT
                     '{db_name}' COLLATE DATABASE_DEFAULT AS database_name,
                     s.name COLLATE DATABASE_DEFAULT AS schema_name,
@@ -1891,12 +2092,15 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
                 WHERE o.name = '{target_object}'
                   AND s.name = '{target_schema}'
                   AND o.type IN ('U', 'V')  -- User tables and views
-            """)
+            """
+            )
 
         # Combine with UNION ALL and execute once
         union_query = "\nUNION ALL\n".join(union_parts)
 
-        logger.debug(f"Searching for '{object_name}' across {len(databases_to_search)} databases with single UNION query")
+        logger.debug(
+            f"Searching for '{object_name}' across {len(databases_to_search)} databases with single UNION query"
+        )
         results = conn.execute_query(union_query)
 
         if results and len(results) > 0:
@@ -1905,21 +2109,23 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
             full_name = f"{result['database_name']}.{result['schema_name']}.{result['object_name']}"
 
             if len(results) > 1:
-                logger.warning(f"Object '{object_name}' found in {len(results)} databases: {[r['database_name'] for r in results]}, using {result['database_name']}")
+                logger.warning(
+                    f"Object '{object_name}' found in {len(results)} databases: {[r['database_name'] for r in results]}, using {result['database_name']}"
+                )
 
             logger.info(f"Found object '{object_name}' in database '{result['database_name']}'")
 
             return FindObjectDatabaseResponse(
-                database_name=result['database_name'],
-                schema_name=result['schema_name'],
-                object_name=result['object_name'],
-                object_type=result['object_type'],
+                database_name=result["database_name"],
+                schema_name=result["schema_name"],
+                object_name=result["object_name"],
+                object_type=result["object_type"],
                 full_name=full_name,
-                success=True
+                success=True,
             )
         else:
             # Not found
-            searched_dbs = ', '.join(databases_to_search[:5])
+            searched_dbs = ", ".join(databases_to_search[:5])
             if len(databases_to_search) > 5:
                 searched_dbs += f" and {len(databases_to_search) - 5} more"
 
@@ -1930,7 +2136,7 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
                 object_type=None,
                 full_name=None,
                 success=False,
-                error=f"Object '{object_name}' not found in any accessible database (searched: {searched_dbs})"
+                error=f"Object '{object_name}' not found in any accessible database (searched: {searched_dbs})",
             )
 
     except Exception as e:
@@ -1942,5 +2148,117 @@ def find_object_database(object_name: str) -> FindObjectDatabaseResponse:
             object_type=None,
             full_name=None,
             success=False,
-            error=str(e)
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def execute_select_query(
+    query: str,
+    database_name: str | None = None,
+    row_limit: int = 100,
+    timeout_seconds: int = 30,
+) -> ExecuteSelectQueryResponse:
+    """
+    Execute a SELECT query and return the result set with column metadata.
+
+    Use this tool to query any table or view the server has access to.
+    Only SELECT and WITH (CTE) queries are allowed.
+
+    Args:
+        query: SQL SELECT query to execute
+        database_name: Optional database context (prepends USE {database})
+        row_limit: Maximum rows to return (default 100, max 1000)
+        timeout_seconds: Query timeout in seconds (default 30, max 120)
+
+    Returns:
+        ExecuteSelectQueryResponse with columns, rows, and metadata
+    """
+    logger.info("Tool called: execute_select_query")
+
+    try:
+        # Validate query safety
+        validation_error = _validate_select_query(query)
+        if validation_error:
+            return ExecuteSelectQueryResponse(
+                success=False,
+                error=validation_error,
+            )
+
+        # Validate database_name to prevent injection
+        if database_name and not re.match(r"^[a-zA-Z0-9_\[\]]+$", database_name):
+            return ExecuteSelectQueryResponse(
+                success=False,
+                error="Invalid database name. Only alphanumeric characters, underscores, and brackets are allowed.",
+            )
+
+        # Clamp parameters
+        row_limit = max(1, min(row_limit, 1000))
+        timeout_seconds = max(1, min(timeout_seconds, 120))
+
+        # Build query batch
+        query_parts = []
+        if database_name:
+            query_parts.append(f"USE {database_name};")
+        query_parts.append(query)
+        combined_query = "\n".join(query_parts)
+
+        # Execute with manual connection for cursor.description access
+        conn = get_connection()
+        conn_str = conn.get_connection_string()
+
+        start_time = time.time()
+
+        with pyodbc.connect(conn_str, timeout=timeout_seconds) as db_conn:
+            cursor = db_conn.cursor()
+            cursor.execute(combined_query)
+
+            # Skip result sets until we find one with columns (handles USE statement)
+            columns_meta = []
+            rows_data = []
+            truncated = False
+
+            while True:
+                if cursor.description:
+                    # Build column metadata
+                    columns_meta = []
+                    for col_desc in cursor.description:
+                        col_name = col_desc[0]
+                        col_type_code = col_desc[1]
+                        type_name = getattr(col_type_code, "__name__", str(col_type_code))
+                        columns_meta.append(ColumnMetadata(name=col_name, type_name=type_name))
+
+                    # Fetch row_limit + 1 to detect truncation
+                    raw_rows = cursor.fetchmany(row_limit + 1)
+                    if len(raw_rows) > row_limit:
+                        truncated = True
+                        raw_rows = raw_rows[:row_limit]
+
+                    # Serialize rows
+                    col_names = [col_desc[0] for col_desc in cursor.description]
+                    rows_data = [
+                        {col_names[i]: _serialize_value(val) for i, val in enumerate(row)}
+                        for row in raw_rows
+                    ]
+
+                # Move to next result set
+                if not cursor.nextset():
+                    break
+
+        execution_time_ms = int((time.time() - start_time) * 1000)
+
+        return ExecuteSelectQueryResponse(
+            columns=columns_meta,
+            rows=rows_data,
+            row_count=len(rows_data),
+            truncated=truncated,
+            execution_time_ms=execution_time_ms,
+            success=True,
+        )
+
+    except Exception as e:
+        logger.error(f"Error executing select query: {str(e)}")
+        return ExecuteSelectQueryResponse(
+            success=False,
+            error=str(e),
         )

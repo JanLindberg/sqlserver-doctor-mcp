@@ -16,7 +16,7 @@ class TestSQLServerConnection:
             assert conn.host == "localhost"
             assert conn.port == "1433"
             assert conn.database == "master"
-            assert conn.driver == "ODBC Driver 18 for SQL Server"
+            assert conn.driver == "ODBC Driver 17 for SQL Server"
 
     def test_init_from_env_variables(self):
         """Test connection initialization from environment variables."""
@@ -64,6 +64,7 @@ class TestSQLServerConnection:
         mock_cursor = MagicMock()
         mock_cursor.description = [("col1",), ("col2",)]
         mock_cursor.fetchall.return_value = [("val1", "val2")]
+        mock_cursor.nextset.return_value = False
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
         mock_conn.__enter__.return_value = mock_conn
@@ -96,6 +97,7 @@ class TestSQLServerConnection:
         mock_cursor = MagicMock()
         mock_cursor.description = [("Version",), ("ServerName",)]
         mock_cursor.fetchall.return_value = [("SQL Server 2019", "TESTSERVER")]
+        mock_cursor.nextset.return_value = False
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
         mock_conn.__enter__.return_value = mock_conn

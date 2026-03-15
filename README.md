@@ -38,6 +38,12 @@ Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 - "Check if my query has antipatterns"
 - "What indexes should I create for this query?"
 
+**Data exploration:**
+- "Show me the top 10 rows from the Orders table"
+- "What columns does the Customers table have?"
+- "Query the sales data for last month"
+- "Run this SELECT query against the production database"
+
 ## Features
 
 Currently implemented tools:
@@ -46,6 +52,7 @@ Currently implemented tools:
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
 - **find_object_database** - Find which database contains a specific table or view
+- **execute_select_query** - Execute SELECT queries and return result sets with column metadata
 
 **Performance Monitoring:**
 - **get_server_configurations** - Analyze critical server configurations (max memory, MAXDOP, cost threshold) with recommendations
@@ -214,6 +221,14 @@ Once connected, Claude can use these tools:
   - Supports formats: "TableName", "Schema.TableName", "Database.Schema.TableName"
   - Returns database name, schema name, object name, and object type
   - Useful for query tuning when database context is unclear
+- **execute_select_query(query, database_name, row_limit, timeout_seconds)** - Executes SELECT queries and returns result sets:
+  - Only allows SELECT and WITH (CTE) queries (read-only safety)
+  - Returns column metadata (names and types) alongside data rows
+  - Configurable row limit (default 100, max 1000) with truncation detection
+  - Query timeout support (default 30s, max 120s)
+  - Optional database context via database_name parameter
+  - Automatic type serialization (Decimal, datetime, bytes to JSON-safe types)
+  - Database name validation to prevent SQL injection
 
 ## Diagnostic Skills
 
@@ -339,9 +354,10 @@ sqlserver-doctor-mcp/
 │           ├── __init__.py
 │           ├── connection.py  # SQL Server connection management
 │           └── logger.py      # Logging configuration
-├── tests/                     # Unit tests
+├── tests/                     # Unit and integration tests
 ├── pyproject.toml            # Project configuration
 ├── .env.example              # Example environment variables
+├── run_tests.bat             # Run tests (Windows)
 └── README.md
 ```
 

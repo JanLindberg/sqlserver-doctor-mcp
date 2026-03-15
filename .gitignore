@@ -40,6 +40,7 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+run_tests.bat
 
 # Type checking
 .mypy_cache/
