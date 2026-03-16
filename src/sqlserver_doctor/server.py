@@ -441,22 +441,78 @@ class ExecuteSelectQueryResponse(BaseModel):
 
 
 # Helper functions for execute_select_query
+def _extract_preamble_and_body(query: str) -> tuple[str, str]:
+    """Split a query into preamble (USE/DECLARE/SET statements) and the main body.
+
+    Returns (preamble, body) where preamble contains USE/DECLARE/SET statements
+    and body is the remaining query starting with SELECT/WITH.
+    Both are returned with original casing preserved.
+    """
+    # Allowed preamble keywords (case-insensitive)
+    preamble_keywords = {"USE", "DECLARE", "SET"}
+
+    # Remove comments for analysis but keep original for extraction
+    stripped = query.strip()
+    cleaned = re.sub(r"--[^\n]*", " ", stripped)
+    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
+
+    # Split into statements by semicolons and newlines.
+    # DECLARE statements may or may not end with semicolons.
+    # We'll work line-by-line to find where the preamble ends.
+    lines = stripped.split("\n")
+    cleaned_lines = re.sub(r"--[^\n]*", " ", stripped)
+    cleaned_lines = re.sub(r"/\*.*?\*/", " ", cleaned_lines, flags=re.DOTALL)
+    cleaned_line_list = cleaned_lines.split("\n")
+
+    preamble_lines = []
+    body_start_idx = 0
+
+    for i, (orig_line, clean_line) in enumerate(zip(lines, cleaned_line_list)):
+        clean_stripped = clean_line.strip().upper()
+        if not clean_stripped:
+            preamble_lines.append(orig_line)
+            body_start_idx = i + 1
+            continue
+
+        first_word = clean_stripped.split()[0] if clean_stripped.split() else ""
+        # Remove trailing semicolons for keyword check
+        first_word = first_word.rstrip(";")
+
+        if first_word in preamble_keywords:
+            preamble_lines.append(orig_line)
+            body_start_idx = i + 1
+        else:
+            break
+
+    preamble = "\n".join(preamble_lines)
+    body = "\n".join(lines[body_start_idx:])
+    return preamble, body
+
+
 def _validate_select_query(query: str) -> str | None:
     """Validate that a query is a safe SELECT statement.
 
+    Allows USE, DECLARE, and SET statements before the main SELECT/WITH query.
     Returns error message if query is not safe, None if OK.
     """
-    stripped = query.strip()
-    # Remove single-line comments
-    cleaned = re.sub(r"--[^\n]*", " ", stripped)
-    # Remove multi-line comments
-    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
-    cleaned = cleaned.strip().upper()
+    _, body = _extract_preamble_and_body(query)
 
-    if not cleaned.startswith("SELECT") and not cleaned.startswith("WITH"):
-        return "Only SELECT or WITH (CTE) queries are allowed"
+    # Clean the body for validation
+    cleaned_body = re.sub(r"--[^\n]*", " ", body)
+    cleaned_body = re.sub(r"/\*.*?\*/", " ", cleaned_body, flags=re.DOTALL)
+    cleaned_body = cleaned_body.strip().upper()
 
-    # Check for dangerous keywords after semicolons
+    if not cleaned_body:
+        return "Query body is empty after removing preamble statements"
+
+    if not cleaned_body.startswith("SELECT") and not cleaned_body.startswith("WITH"):
+        return "Only SELECT or WITH (CTE) queries are allowed (USE, DECLARE, and SET statements are permitted as preamble)"
+
+    # Check for dangerous keywords in all statements (including preamble area)
+    full_cleaned = re.sub(r"--[^\n]*", " ", query.strip())
+    full_cleaned = re.sub(r"/\*.*?\*/", " ", full_cleaned, flags=re.DOTALL)
+    full_cleaned = full_cleaned.strip().upper()
+
     dangerous = {
         "INSERT",
         "UPDATE",
@@ -476,13 +532,14 @@ def _validate_select_query(query: str) -> str | None:
         "DBCC",
         "BULK",
     }
-    statements = cleaned.split(";")
-    for stmt in statements[1:]:
+    # Split on semicolons and check each statement
+    statements = full_cleaned.split(";")
+    for stmt in statements:
         stmt_stripped = stmt.strip()
         if stmt_stripped:
             first_word = stmt_stripped.split()[0] if stmt_stripped.split() else ""
             if first_word in dangerous:
-                return f"Multi-statement queries containing {first_word} are not allowed"
+                return f"Queries containing {first_word} are not allowed"
 
     return None
 
@@ -1344,10 +1401,11 @@ def analyze_query_execution(
     - Bottleneck type (IO_BOUND, CPU_BOUND, WAIT_BOUND, MEMORY_BOUND)
 
     IMPORTANT: This tool executes the query - only use with SELECT statements.
+    USE, DECLARE, and SET statements are permitted as preamble before the main SELECT/WITH query.
 
     Args:
-        query: SQL query to analyze (must be SELECT)
-        database_name: Optional database name (uses current database if not specified)
+        query: SQL query to analyze (must be SELECT, may include USE/DECLARE/SET preamble)
+        database_name: Optional database name (ignored if query already contains USE)
         include_actual_plan: Whether to capture actual execution plan (default: true)
         max_execution_time_seconds: Safety timeout (default: 30)
 
@@ -1356,9 +1414,9 @@ def analyze_query_execution(
     """
     logger.info("Tool called: analyze_query_execution")
     try:
-        # Safety check - only allow SELECT queries
-        query_upper = query.strip().upper()
-        if not query_upper.startswith("SELECT") and not query_upper.startswith("WITH"):
+        # Safety check - only allow SELECT queries (with optional USE/DECLARE/SET preamble)
+        validation_error = _validate_select_query(query)
+        if validation_error:
             return AnalyzeQueryExecutionResponse(
                 execution_metrics=None,
                 execution_plan_xml=None,
@@ -1368,24 +1426,35 @@ def analyze_query_execution(
                 query_hash=None,
                 query_plan_hash=None,
                 success=False,
-                error="Only SELECT queries are allowed for analysis",
+                error=validation_error,
             )
 
         conn = get_connection(connection_name)
+
+        # Extract preamble (USE/DECLARE/SET) from the query
+        preamble, body = _extract_preamble_and_body(query)
+        query_has_use = bool(
+            re.search(r"^\s*USE\s+", preamble, re.IGNORECASE | re.MULTILINE)
+        )
 
         # Build combined query to preserve database context
         # (Each execute_query() creates a new connection, so we must combine statements)
         query_parts = []
 
-        if database_name:
+        # Only prepend USE from database_name if the query doesn't already have one
+        if database_name and not query_has_use:
             query_parts.append(f"USE {database_name};")
+
+        # Add preamble (USE/DECLARE/SET) if present
+        if preamble.strip():
+            query_parts.append(preamble)
 
         # Enable execution plan capture with runtime statistics if requested
         if include_actual_plan:
             query_parts.append("SET STATISTICS XML ON;")
 
-        # Add the user's query
-        query_parts.append(query)
+        # Add the query body (without preamble)
+        query_parts.append(body)
 
         # Disable statistics capture
         if include_actual_plan:
@@ -2408,11 +2477,12 @@ def execute_select_query(
     Execute a SELECT query and return the result set with column metadata.
 
     Use this tool to query any table or view the server has access to.
-    Only SELECT and WITH (CTE) queries are allowed.
+    Only SELECT and WITH (CTE) queries are allowed. USE, DECLARE, and SET
+    statements are permitted as preamble before the main SELECT/WITH query.
 
     Args:
-        query: SQL SELECT query to execute
-        database_name: Optional database context (prepends USE {database})
+        query: SQL SELECT query to execute (may include USE/DECLARE/SET preamble)
+        database_name: Optional database context (prepends USE {database}, ignored if query already contains USE)
         row_limit: Maximum rows to return (default 100, max 1000)
         timeout_seconds: Query timeout in seconds (default 30, max 120)
 
@@ -2441,11 +2511,22 @@ def execute_select_query(
         row_limit = max(1, min(row_limit, 1000))
         timeout_seconds = max(1, min(timeout_seconds, 120))
 
+        # Extract preamble (USE/DECLARE/SET) from the query
+        preamble, body = _extract_preamble_and_body(query)
+        query_has_use = bool(
+            re.search(r"^\s*USE\s+", preamble, re.IGNORECASE | re.MULTILINE)
+        )
+
         # Build query batch
         query_parts = []
-        if database_name:
+        # Only prepend USE from database_name if the query doesn't already have one
+        if database_name and not query_has_use:
             query_parts.append(f"USE {database_name};")
-        query_parts.append(query)
+        # Add preamble (USE/DECLARE/SET) if present
+        if preamble.strip():
+            query_parts.append(preamble)
+        # Add the query body
+        query_parts.append(body)
         combined_query = "\n".join(query_parts)
 
         # Execute with manual connection for cursor.description access

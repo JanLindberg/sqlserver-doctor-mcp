@@ -17,6 +17,7 @@ from sqlserver_doctor.server import (
     list_connections,
     set_active_connection,
     _validate_select_query,
+    _extract_preamble_and_body,
     _serialize_value,
     _simplify_execution_plan_xml,
     _strip_element,
@@ -928,6 +929,91 @@ class TestExecuteSelectQuery:
         """Test that comments are stripped before validation."""
         assert _validate_select_query("-- comment\nSELECT 1") is None
         assert _validate_select_query("/* comment */ SELECT 1") is None
+
+    def test_validate_select_query_allows_declare_preamble(self):
+        """Test that DECLARE statements before SELECT are allowed."""
+        query = "DECLARE @ID INT = 1;\nSELECT * FROM Users WHERE Id = @ID"
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_allows_multiple_declares(self):
+        """Test that multiple DECLARE statements are allowed."""
+        query = (
+            "DECLARE @DATEFROM DATE='2026-03-13'\n"
+            "DECLARE @DATETO DATE='2026-03-13'\n"
+            "DECLARE @P_SHDOCO INT = 3652120;\n"
+            "SELECT * FROM Orders WHERE OrderDate BETWEEN @DATEFROM AND @DATETO"
+        )
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_allows_use_preamble(self):
+        """Test that USE database before SELECT is allowed."""
+        query = "USE mydb\nSELECT 1"
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_allows_use_and_declare(self):
+        """Test that USE + DECLARE + SELECT is allowed."""
+        query = (
+            "USE raptor\n"
+            "DECLARE @TODAY DATE = GETDATE();\n"
+            "SELECT * FROM Orders WHERE OrderDate = @TODAY"
+        )
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_allows_set_preamble(self):
+        """Test that SET statements before SELECT are allowed."""
+        query = "SET NOCOUNT ON;\nSELECT 1"
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_allows_declare_with_cte(self):
+        """Test that DECLARE + WITH (CTE) is allowed."""
+        query = (
+            "DECLARE @ID INT = 1;\n"
+            "WITH cte AS (SELECT @ID AS val)\n"
+            "SELECT * FROM cte"
+        )
+        assert _validate_select_query(query) is None
+
+    def test_validate_select_query_rejects_declare_with_delete(self):
+        """Test that DECLARE followed by DELETE is rejected."""
+        query = "DECLARE @ID INT = 1;\nDELETE FROM Users WHERE Id = @ID"
+        result = _validate_select_query(query)
+        assert result is not None
+        assert "DELETE" in result or "SELECT" in result
+
+    def test_validate_select_query_rejects_exec_after_declare(self):
+        """Test that EXEC after DECLARE is rejected."""
+        query = "DECLARE @ID INT = 1;\nSELECT 1; EXEC sp_help"
+        result = _validate_select_query(query)
+        assert result is not None
+        assert "EXEC" in result
+
+    def test_extract_preamble_and_body_basic(self):
+        """Test preamble extraction with DECLARE statements."""
+        query = "DECLARE @ID INT = 1;\nSELECT * FROM Users"
+        preamble, body = _extract_preamble_and_body(query)
+        assert "DECLARE" in preamble
+        assert body.strip().startswith("SELECT")
+
+    def test_extract_preamble_and_body_use_and_declares(self):
+        """Test preamble extraction with USE and multiple DECLAREs."""
+        query = (
+            "USE raptor\n"
+            "DECLARE @A INT = 1\n"
+            "DECLARE @B INT = 2\n"
+            "SELECT @A + @B"
+        )
+        preamble, body = _extract_preamble_and_body(query)
+        assert "USE raptor" in preamble
+        assert "DECLARE @A" in preamble
+        assert "DECLARE @B" in preamble
+        assert body.strip() == "SELECT @A + @B"
+
+    def test_extract_preamble_and_body_no_preamble(self):
+        """Test that plain SELECT has empty preamble."""
+        query = "SELECT 1"
+        preamble, body = _extract_preamble_and_body(query)
+        assert preamble.strip() == ""
+        assert body.strip() == "SELECT 1"
 
 
 class TestListConnections:
